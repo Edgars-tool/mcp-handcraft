@@ -27,7 +27,13 @@
 
 ```powershell
 winget install Anthropic.ClaudeCode
-claude login
+claude auth login
 ```
 
 如果 `claude` 指令不在 PATH，HTTP tool call 會失敗。
+
+## HTTP 版注意事項
+
+- `server_http.py` 目前預設會在 `90` 秒內等 agent 回覆。
+- 這是為了避免 Cloudflare Tunnel 一類的 HTTP 代理先超時，外面只看到空白或中斷。
+- 若要改長一點，可設定環境變數 `MCP_AGENT_TIMEOUT_SECONDS`。

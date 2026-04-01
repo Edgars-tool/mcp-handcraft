@@ -17,6 +17,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 CODEX_CMD = r"C:\Users\Windows10-JS\AppData\Roaming\npm\codex.cmd"
 CODEX_DEFAULT_WORKDIR = r"C:\Users\Windows10-JS"
+AGENT_TIMEOUT_SECONDS = int(os.getenv("MCP_AGENT_TIMEOUT_SECONDS", "90"))
 
 PORT = 8765
 PROTOCOL_VERSION = "2025-11-25"
@@ -115,6 +116,42 @@ def make_error(req_id, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
 
 
+def run_agent_command(command: list[str], cwd: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=AGENT_TIMEOUT_SECONDS,
+        cwd=cwd,
+        shell=False,
+    )
+
+
+def finalize_agent_output(
+    result: subprocess.CompletedProcess,
+    *,
+    stdout_text: str = "",
+    fallback_label: str,
+) -> tuple[str, bool]:
+    stdout_text = stdout_text.strip() if stdout_text else ""
+    stderr_text = (result.stderr or "").strip()
+
+    output = stdout_text or (result.stdout or "").strip()
+
+    if result.returncode != 0:
+        sections = []
+        if stderr_text:
+            sections.append(f"[stderr]\n{stderr_text}")
+        if output:
+            sections.append(f"[stdout]\n{output}")
+        output = "\n".join(sections).strip()
+
+    if not output:
+        output = f"{fallback_label} exited with code {result.returncode} (no output)"
+
+    return output, result.returncode != 0
+
+
 # ─── Request Handlers（與 stdio 版邏輯相同，改為 return 而非 send）────────────
 
 def handle_initialize(req_id, params: dict) -> dict:
@@ -177,8 +214,10 @@ def handle_codex_agent(req_id, arguments: dict) -> dict:
     os.close(tmp_fd)
 
     try:
-        result = subprocess.run(
+        result = run_agent_command(
             [
+                "cmd.exe",
+                "/c",
                 CODEX_CMD,
                 "exec",
                 "--full-auto",       # 自動承認、sandbox=workspace-write
@@ -188,10 +227,7 @@ def handle_codex_agent(req_id, arguments: dict) -> dict:
                 "-o", tmp_path,      # 最終メッセージをファイルへ
                 task,
             ],
-            capture_output=True,
-            text=True,
-            timeout=300,            # 5 分タイムアウト
-            shell=True,             # Windows で .cmd を実行するために必要
+            cwd=working_dir,
         )
         log(f"codex_agent: exit_code={result.returncode}")
 
@@ -203,22 +239,24 @@ def handle_codex_agent(req_id, arguments: dict) -> dict:
         except Exception:
             pass
 
-        if not output:
-            output = (result.stdout or "").strip()
-        if not output:
-            output = f"Codex exited with code {result.returncode}. stderr: {result.stderr[:500]}"
+        output, is_error = finalize_agent_output(
+            result,
+            stdout_text=output,
+            fallback_label="Codex",
+        )
 
     except subprocess.TimeoutExpired:
-        output = "codex_agent timed out after 5 minutes"
+        output = f"codex_agent timed out after {AGENT_TIMEOUT_SECONDS} seconds"
+        is_error = True
     except Exception as exc:
         output = f"Failed to run Codex: {exc}"
+        is_error = True
     finally:
         try:
             os.unlink(tmp_path)
         except Exception:
             pass
 
-    is_error = result.returncode != 0 if "result" in dir() else True
     return make_response(req_id, {
         "content": [{"type": "text", "text": output}],
         "isError": is_error,
@@ -238,30 +276,26 @@ def handle_claude_code_agent(req_id, arguments: dict) -> dict:
     log(f"claude_code_agent: task={task!r} workdir={working_dir!r}")
 
     try:
-        result = subprocess.run(
+        result = run_agent_command(
             ["claude", "-p", task, "--output-format", "text"],
-            capture_output=True,
-            text=True,
-            timeout=300,
             cwd=working_dir,
-            shell=True,
         )
         log(f"claude_code_agent: exit_code={result.returncode}")
 
-        output = (result.stdout or "").strip()
-        if not output and result.stderr:
-            output = f"[stderr]\n{result.stderr.strip()}"
-        if not output:
-            output = f"Claude Code exited with code {result.returncode} (no output)"
+        output, is_error = finalize_agent_output(
+            result,
+            fallback_label="Claude Code",
+        )
 
     except subprocess.TimeoutExpired:
-        output = "claude_code_agent timed out after 5 minutes"
+        output = f"claude_code_agent timed out after {AGENT_TIMEOUT_SECONDS} seconds"
+        is_error = True
     except FileNotFoundError:
         output = "Error: claude command not found. Run: winget install Anthropic.ClaudeCode"
+        is_error = True
     except Exception as exc:
         output = f"Failed to run Claude Code: {exc}"
-
-    is_error = result.returncode != 0 if "result" in dir() else True
+        is_error = True
     return make_response(req_id, {
         "content": [{"type": "text", "text": output}],
         "isError": is_error,
