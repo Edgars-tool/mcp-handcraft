@@ -27,6 +27,10 @@ CLAUDE_CMD = r"C:\Users\Windows10-JS\AppData\Roaming\npm\claude.cmd"
 GEMINI_CMD = r"C:\Users\Windows10-JS\AppData\Roaming\npm\gemini.cmd"
 CODEX_DEFAULT_WORKDIR = r"C:\Users\Windows10-JS"
 AGENT_TIMEOUT_SECONDS = int(os.getenv("MCP_AGENT_TIMEOUT_SECONDS", "90"))
+CODEX_LOCAL_EXECUTION_MODE = os.getenv(
+    "MCP_CODEX_EXECUTION_MODE",
+    "danger-full-access",
+).strip().lower()
 
 PORT = 8765
 PROTOCOL_VERSION = "2025-11-25"
@@ -409,21 +413,30 @@ def run_codex_task(task: str, working_dir: str) -> tuple[str, bool]:
     os.close(tmp_fd)
 
     try:
-        result = run_agent_command(
-            [
-                "cmd.exe",
-                "/c",
-                CODEX_CMD,
-                "exec",
-                "--full-auto",
-                "--ephemeral",
-                "--skip-git-repo-check",
-                "-C", working_dir,
-                "-o", tmp_path,
-                task,
-            ],
-            cwd=working_dir,
-        )
+        command = [
+            "cmd.exe",
+            "/c",
+            CODEX_CMD,
+            "exec",
+        ]
+
+        # Windows + workspace-write currently breaks even trivial PowerShell shell commands.
+        # Default to danger-full-access for this local-only MCP bridge so Codex can actually
+        # read files and execute the shell operations the user requested.
+        if CODEX_LOCAL_EXECUTION_MODE == "workspace-write":
+            command.append("--full-auto")
+        else:
+            command.append("--dangerously-bypass-approvals-and-sandbox")
+
+        command.extend([
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "-C", working_dir,
+            "-o", tmp_path,
+            task,
+        ])
+
+        result = run_agent_command(command, cwd=working_dir)
         log(f"codex_agent: exit_code={result.returncode}")
 
         output = ""
