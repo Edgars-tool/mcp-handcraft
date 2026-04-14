@@ -8,11 +8,13 @@
   啟動 `server.py`
   給本地 `stdio` 方式的 MCP client 使用。
   適合 Ollama、龍蝦這類直接用標準輸入輸出溝通的本地流程。
+  目前走 Windows `py -3` launcher，不綁死特定使用者路徑。
 
 - `run_http.cmd`
   啟動 `server_http.py`
   給 HTTP 方式的 MCP client 使用。
   適合 MCP Inspector、瀏覽器測試、或其他會用 `POST /mcp` 連進來的 client。
+  目前走 Windows `py -3` launcher，不綁死特定使用者路徑。
 
 ## 現況提醒
 
