@@ -17,11 +17,15 @@ import time
 import uuid
 import shutil
 import urllib.parse
+import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
+
+# ── Secrets（由 Doppler 注入）─────────────────────────────────────────────────
+NOTION_API_KEY = os.getenv("NOTION_API_KEY", "")
 
 CODEX_CMD = r"C:\Users\EdgarsTool\AppData\Roaming\npm\codex.cmd"
 CLAUDE_CMD = shutil.which("claude") or "claude"
@@ -206,6 +210,44 @@ TOOLS = [
                 },
             },
             "required": ["task"],
+        },
+    },
+    {
+        "name": "notion_search",
+        "description": (
+            "Search pages and databases in Notion. Returns a list of matching pages "
+            "with their titles, IDs, and URLs. Use this to find Notion content by keyword."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search keyword to find in Notion pages and databases.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max number of results to return (default 10, max 20).",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "notion_get_page",
+        "description": (
+            "Fetch the content of a specific Notion page by its page ID or URL. "
+            "Returns the page title and all text blocks."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "page_id": {
+                    "type": "string",
+                    "description": "Notion page ID (UUID format) or full Notion page URL.",
+                },
+            },
+            "required": ["page_id"],
         },
     },
 ]
@@ -591,6 +633,12 @@ def handle_tools_call(req_id, params: dict) -> dict:
     if name == "smart_agent":
         return handle_smart_agent(req_id, arguments)
 
+    if name == "notion_search":
+        return handle_notion_search(req_id, arguments)
+
+    if name == "notion_get_page":
+        return handle_notion_get_page(req_id, arguments)
+
     return make_response(req_id, make_tool_text_response(f"Unknown tool: {name}", is_error=True))
 
 
@@ -657,6 +705,103 @@ def handle_smart_agent(req_id, arguments: dict) -> dict:
             attempt_lines.append(line)
         text = "\n".join(attempt_lines + ["", output])
     return make_response(req_id, make_tool_text_response(text, is_error=is_error))
+
+
+# ── Notion helpers ────────────────────────────────────────────────────────────
+
+def _notion_request(path: str, method: str = "GET", body: dict | None = None) -> dict:
+    """發送 Notion API 請求，回傳 parsed JSON 或拋出 Exception。"""
+    if not NOTION_API_KEY:
+        raise ValueError("NOTION_API_KEY not set — add it in Doppler and restart server")
+    url = "https://api.notion.com/v1" + path
+    data = json.dumps(body).encode("utf-8") if body else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {NOTION_API_KEY}")
+    req.add_header("Notion-Version", "2022-06-28")
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _extract_plain_text(rich_text_list: list) -> str:
+    return "".join(rt.get("plain_text", "") for rt in rich_text_list)
+
+
+def _page_title(page: dict) -> str:
+    props = page.get("properties", {})
+    for prop in props.values():
+        if prop.get("type") == "title":
+            return _extract_plain_text(prop.get("title", []))
+    return "(no title)"
+
+
+def _blocks_to_text(blocks: list) -> str:
+    lines = []
+    for block in blocks:
+        btype = block.get("type", "")
+        content = block.get(btype, {})
+        rich = content.get("rich_text", [])
+        text = _extract_plain_text(rich).strip()
+        if text:
+            if btype.startswith("heading"):
+                lines.append(f"\n## {text}")
+            elif btype == "bulleted_list_item":
+                lines.append(f"- {text}")
+            elif btype == "numbered_list_item":
+                lines.append(f"1. {text}")
+            elif btype == "to_do":
+                checked = "x" if content.get("checked") else " "
+                lines.append(f"[{checked}] {text}")
+            elif btype == "code":
+                lang = content.get("language", "")
+                lines.append(f"```{lang}\n{text}\n```")
+            else:
+                lines.append(text)
+    return "\n".join(lines)
+
+
+def handle_notion_search(req_id, arguments: dict) -> dict:
+    query = arguments.get("query", "").strip()
+    limit = min(int(arguments.get("limit", 10)), 20)
+    if not query:
+        return make_response(req_id, make_tool_text_response("Error: query is required", is_error=True))
+    try:
+        data = _notion_request("/search", "POST", {"query": query, "page_size": limit})
+        results = data.get("results", [])
+        if not results:
+            return make_response(req_id, make_tool_text_response(f"No results found for: {query}"))
+        lines = [f"Found {len(results)} result(s) for \"{query}\":\n"]
+        for item in results:
+            obj_type = item.get("object", "")
+            title = _page_title(item) if obj_type == "page" else item.get("title", "(no title)")
+            url = item.get("url", "")
+            page_id = item.get("id", "")
+            lines.append(f"- [{title}]({url})\n  id: {page_id}  type: {obj_type}")
+        return make_response(req_id, make_tool_text_response("\n".join(lines)))
+    except Exception as exc:
+        return make_response(req_id, make_tool_text_response(f"Notion search error: {exc}", is_error=True))
+
+
+def handle_notion_get_page(req_id, arguments: dict) -> dict:
+    page_id = arguments.get("page_id", "").strip()
+    if not page_id:
+        return make_response(req_id, make_tool_text_response("Error: page_id is required", is_error=True))
+    # 從 URL 取出 ID（最後一段 32 碼 hex，去掉 dash）
+    if page_id.startswith("http"):
+        raw = page_id.rstrip("/").split("/")[-1].split("?")[0]
+        page_id = raw[-32:].replace("-", "")
+        page_id = f"{page_id[:8]}-{page_id[8:12]}-{page_id[12:16]}-{page_id[16:20]}-{page_id[20:]}"
+    try:
+        page = _notion_request(f"/pages/{page_id}")
+        title = _page_title(page)
+        url = page.get("url", "")
+        blocks_data = _notion_request(f"/blocks/{page_id}/children?page_size=100")
+        blocks = blocks_data.get("results", [])
+        body = _blocks_to_text(blocks) or "(no content)"
+        text = f"# {title}\n{url}\n\n{body}"
+        return make_response(req_id, make_tool_text_response(text))
+    except Exception as exc:
+        return make_response(req_id, make_tool_text_response(f"Notion get page error: {exc}", is_error=True))
 
 
 REQUEST_HANDLERS = {
