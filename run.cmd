@@ -1,3 +1,3 @@
 @echo off
 setlocal
-py -3 "%~dp0server.py"
+doppler run -- py -3 "%~dp0server.py"
