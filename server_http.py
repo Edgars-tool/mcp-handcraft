@@ -26,6 +26,7 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 
 # ── Secrets（由 Doppler 注入）─────────────────────────────────────────────────
 NOTION_API_KEY = os.getenv("NOTION_API_KEY", "")
+API_TOKEN = os.getenv("MCP_API_TOKEN", "")
 
 CODEX_CMD = r"C:\Users\EdgarsTool\AppData\Roaming\npm\codex.cmd"
 CLAUDE_CMD = shutil.which("claude") or "claude"
@@ -35,7 +36,6 @@ AGENT_TIMEOUT_SECONDS = int(os.getenv("MCP_AGENT_TIMEOUT_SECONDS", "300"))
 
 PORT = 8765
 PROTOCOL_VERSION = "2025-11-25"
-API_TOKEN = "null$Orchestrator=zer0"
 DEFAULT_JOB_RETENTION_SECONDS = int(os.getenv("MCP_JOB_RETENTION_SECONDS", "3600"))
 
 SERVER_INFO = {
@@ -870,7 +870,14 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
 
         # ── Bearer token 驗證 ─────────────────────────────────────────────────
         auth = self.headers.get("Authorization", "")
-        if auth:
+        if API_TOKEN:  # Token 已設定時，header 必須存在且正確
+            if not auth:
+                log("401 Unauthorized: missing token")
+                self.send_response(401)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"Unauthorized")
+                return
             token = auth.removeprefix("Bearer ").strip()
             if token != API_TOKEN:
                 log(f"401 Unauthorized: invalid token")
