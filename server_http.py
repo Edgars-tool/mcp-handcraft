@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
+from mmx_handlers import DISPATCH, hmi, hmvd, hms, hmu, hmv, hmsq, hmc, hmq
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
@@ -31,6 +32,7 @@ API_TOKEN = os.getenv("MCP_API_TOKEN", "")
 CODEX_CMD = r"C:\Users\EdgarsTool\AppData\Roaming\npm\codex.cmd"
 CLAUDE_CMD = shutil.which("claude") or "claude"
 GEMINI_CMD = shutil.which("gemini") or "gemini"
+OLLAMA_CMD = r"C:\Users\EdgarsTool\AppData\Local\Programs\Ollama\ollama.exe"
 CODEX_DEFAULT_WORKDIR = r"C:\Users\EdgarsTool"
 AGENT_TIMEOUT_SECONDS = int(os.getenv("MCP_AGENT_TIMEOUT_SECONDS", "300"))
 
@@ -248,6 +250,149 @@ TOOLS = [
                 },
             },
             "required": ["page_id"],
+        },
+    },
+    {
+        "name": "mmx_image_generate",
+        "description": (
+            "Generate images using MiniMax AI image-01 model. "
+            "Returns image URLs or saved file paths."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Image description prompt."},
+                "aspect_ratio": {"type": "string", "description": "Aspect ratio like 16:9, 1:1, 9:16."},
+                "n": {"type": "integer", "description": "Number of images to generate (default 1)."},
+                "out_dir": {"type": "string", "description": "Directory to save images."},
+            },
+            "required": ["prompt"],
+        },
+    },
+    {
+        "name": "mmx_video_generate",
+        "description": (
+            "Generate videos using MiniMax AI Hailuo-2.3 model. "
+            "This is async — set async=true to get a job_id immediately, "
+            "or wait for the video to be generated and returned as a file path."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Video description prompt."},
+                "async": {"type": "boolean", "description": "Return job_id immediately without waiting."},
+                "first_frame": {"type": "string", "description": "Path or URL to first frame image."},
+                "download": {"type": "string", "description": "File path to save the video."},
+            },
+            "required": ["prompt"],
+        },
+    },
+    {
+        "name": "mmx_speech_synthesize",
+        "description": (
+            "Text-to-speech using MiniMax speech-2.8-hd model. "
+            "Converts text to audio file (mp3 by default)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Text to synthesize (max 10k chars)."},
+                "text_file": {"type": "string", "description": "Path to text file (use - for stdin)."},
+                "voice": {"type": "string", "description": "Voice ID (default: English_expressive_narrator)."},
+                "model": {"type": "string", "description": "Model: speech-2.8-hd, speech-2.6, or speech-02."},
+                "speed": {"type": "number", "description": "Speed multiplier."},
+                "format": {"type": "string", "description": "Audio format (default: mp3)."},
+                "out": {"type": "string", "description": "Output file path."},
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "mmx_music_generate",
+        "description": (
+            "Generate music using MiniMax music-2.5 model. "
+            "Can create songs with vocals or instrumental music."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Music style/description prompt."},
+                "lyrics": {"type": "string", "description": "Song lyrics with structure tags."},
+                "vocals": {"type": "string", "description": "Vocal style description."},
+                "genre": {"type": "string", "description": "Music genre."},
+                "mood": {"type": "string", "description": "Mood or emotion."},
+                "instruments": {"type": "string", "description": "Instruments to feature."},
+                "bpm": {"type": "number", "description": "Exact tempo in BPM."},
+                "instrumental": {"type": "boolean", "description": "Generate instrumental without vocals."},
+                "out": {"type": "string", "description": "Output file path."},
+            },
+        },
+    },
+    {
+        "name": "mmx_vision_describe",
+        "description": (
+            "Image understanding via MiniMax VL model. "
+            "Describes or answers questions about an image."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "image": {"type": "string", "description": "Image path or URL."},
+                "file_id": {"type": "string", "description": "Pre-uploaded file ID."},
+                "prompt": {"type": "string", "description": "Question about the image."},
+            },
+            "required": ["image"],
+        },
+    },
+    {
+        "name": "mmx_search_query",
+        "description": "Web search via MiniMax AI.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "q": {"type": "string", "description": "Search query."},
+            },
+            "required": ["q"],
+        },
+    },
+    {
+        "name": "mmx_text_chat",
+        "description": (
+            "Chat completion using MiniMax MiniMax-M2.7 model. "
+            "Supports multi-turn conversation and system prompts."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "Message text. Prefix with role: to set role."},
+                "system": {"type": "string", "description": "System prompt."},
+                "model": {"type": "string", "description": "Model ID (default: MiniMax-M2.7)."},
+                "max_tokens": {"type": "integer", "description": "Max tokens (default: 4096)."},
+                "temperature": {"type": "number", "description": "Sampling temperature (0.0-1.0)."},
+            },
+            "required": ["message"],
+        },
+    },
+    {
+        "name": "mmx_quota_show",
+        "description": "Display MiniMax Token Plan usage and remaining quotas.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "ollama_agent",
+        "description": (
+            "Delegates a task to a local Ollama AI model (qwen3.5). "
+            "Fast, runs locally, no API cost. "
+            "Use for quick coding tasks, summarization, and general automation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "The task or instruction for Ollama to execute."},
+                "model": {"type": "string", "description": "Model name (default: qwen3.5:latest)."},
+                "working_dir": {"type": "string", "description": f"Working directory (default: {CODEX_DEFAULT_WORKDIR})"},
+            },
+            "required": ["task"],
         },
     },
 ]
@@ -639,6 +784,26 @@ def handle_tools_call(req_id, params: dict) -> dict:
     if name == "notion_get_page":
         return handle_notion_get_page(req_id, arguments)
 
+    if name == "mmx_image_generate":
+        return handle_mmx_image_generate(req_id, arguments)
+    if name == "mmx_video_generate":
+        return handle_mmx_video_generate(req_id, arguments)
+    if name == "mmx_speech_synthesize":
+        return handle_mmx_speech_synthesize(req_id, arguments)
+    if name == "mmx_music_generate":
+        return handle_mmx_music_generate(req_id, arguments)
+    if name == "mmx_vision_describe":
+        return handle_mmx_vision_describe(req_id, arguments)
+    if name == "mmx_search_query":
+        return handle_mmx_search_query(req_id, arguments)
+    if name == "mmx_text_chat":
+        return handle_mmx_text_chat(req_id, arguments)
+    if name == "mmx_quota_show":
+        return handle_mmx_quota_show(req_id, arguments)
+
+    if name == "ollama_agent":
+        return handle_ollama_agent(req_id, arguments)
+
     return make_response(req_id, make_tool_text_response(f"Unknown tool: {name}", is_error=True))
 
 
@@ -968,6 +1133,37 @@ def main() -> None:
         log("Server stopped (KeyboardInterrupt)")
     finally:
         server.server_close()
+
+
+def run_ollama_task(task: str, model: str, working_dir: str) -> tuple[str, bool]:
+    log(f"ollama_agent: task={task!r} model={model!r} workdir={working_dir!r}")
+    try:
+        result = run_agent_command(
+            ["cmd.exe", "/c", OLLAMA_CMD, "run", model, task],
+            cwd=working_dir,
+        )
+        log(f"ollama_agent: exit_code={result.returncode}")
+        return finalize_agent_output(result, fallback_label="Ollama")
+    except subprocess.TimeoutExpired:
+        return f"ollama_agent timed out after {AGENT_TIMEOUT_SECONDS} seconds", True
+    except FileNotFoundError:
+        return f"Error: ollama command not found at {OLLAMA_CMD}", True
+    except Exception as exc:
+        return f"Failed to run Ollama: {exc}", True
+
+
+def handle_ollama_agent(req_id, arguments: dict) -> dict:
+    sync_args, async_response = maybe_start_async_job(req_id, arguments, "ollama_agent",
+        lambda: run_ollama_task(
+            arguments["task"],
+            arguments.get("model", "qwen3.5:latest"),
+            arguments.get("working_dir", CODEX_DEFAULT_WORKDIR),
+        )
+    )
+    if async_response is not None:
+        return async_response
+    output, is_error = sync_args
+    return make_response(req_id, make_tool_text_response(output, is_error=is_error))
 
 
 if __name__ == "__main__":
