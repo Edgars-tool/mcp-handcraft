@@ -165,6 +165,7 @@ def handle_mmx_text_chat(req_id, arguments: dict) -> dict:
         return make_response(req_id, make_tool_text_response("Error: message is required", is_error=True))
     args = ["text", "chat", "--message", message, "--output", "json", "--quiet"]
     if arguments.get("system"):
+        args += ["--system", arguments["system"]]
     if arguments.get("model"):
         args += ["--model", arguments["model"]]
     if arguments.get("max_tokens"):
