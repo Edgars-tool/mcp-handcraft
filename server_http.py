@@ -38,6 +38,7 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 # ── Secrets（由 Doppler 注入）─────────────────────────────────────────────────
 NOTION_API_KEY = os.getenv("NOTION_API_KEY", "")
 API_TOKEN = os.getenv("MCP_API_TOKEN", "")
+LINEAR_API_KEY = os.getenv("LINEAR_API_KEY", "")
 
 CODEX_CMD = r"C:\Users\EdgarsTool\AppData\Roaming\npm\codex.cmd"
 CLAUDE_CMD = shutil.which("claude") or "claude"
@@ -408,6 +409,83 @@ TOOLS = [
                 "working_dir": {"type": "string", "description": f"Working directory (default: {CODEX_DEFAULT_WORKDIR})"},
             },
             "required": ["task"],
+        },
+    },
+    # ── Linear ────────────────────────────────────────────────────────────────
+    {
+        "name": "linear_list_issues",
+        "description": (
+            "List issues from Linear. Optionally filter by team, assignee, state, or label. "
+            "Returns issue ID, title, status, priority, and URL."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "team_key": {"type": "string", "description": "Team key (e.g. ENG). Leave empty for all teams."},
+                "assignee_me": {"type": "boolean", "description": "Only return issues assigned to the API key owner."},
+                "state": {"type": "string", "description": "Filter by state name (e.g. Todo, In Progress, Done)."},
+                "label": {"type": "string", "description": "Filter by label name."},
+                "limit": {"type": "integer", "description": "Max results to return (default 20, max 50)."},
+            },
+        },
+    },
+    {
+        "name": "linear_get_issue",
+        "description": "Get full details of a Linear issue by its ID (e.g. ENG-123 or the UUID).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "issue_id": {"type": "string", "description": "Linear issue identifier (e.g. ENG-123) or UUID."},
+            },
+            "required": ["issue_id"],
+        },
+    },
+    {
+        "name": "linear_create_issue",
+        "description": "Create a new issue in Linear.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Issue title."},
+                "description": {"type": "string", "description": "Issue description (markdown supported)."},
+                "team_key": {"type": "string", "description": "Team key (e.g. ENG). Required if not using team_id."},
+                "priority": {"type": "integer", "description": "Priority: 0=No priority, 1=Urgent, 2=High, 3=Medium, 4=Low."},
+                "assignee_id": {"type": "string", "description": "UUID of the assignee."},
+                "label_names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of label names to attach.",
+                },
+            },
+            "required": ["title", "team_key"],
+        },
+    },
+    {
+        "name": "linear_update_issue",
+        "description": "Update fields of an existing Linear issue (title, state, priority, assignee, etc.).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "issue_id": {"type": "string", "description": "Linear issue identifier (e.g. ENG-123) or UUID."},
+                "title": {"type": "string", "description": "New title."},
+                "description": {"type": "string", "description": "New description."},
+                "state_name": {"type": "string", "description": "Target state name (e.g. In Progress, Done)."},
+                "priority": {"type": "integer", "description": "New priority (0-4)."},
+                "assignee_id": {"type": "string", "description": "UUID of the new assignee."},
+            },
+            "required": ["issue_id"],
+        },
+    },
+    {
+        "name": "linear_search_issues",
+        "description": "Full-text search across Linear issues. Returns matching issues with title, state, and URL.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search keywords."},
+                "limit": {"type": "integer", "description": "Max results (default 10, max 25)."},
+            },
+            "required": ["query"],
         },
     },
 ]
@@ -819,6 +897,17 @@ def handle_tools_call(req_id, params: dict) -> dict:
     if name == "ollama_agent":
         return handle_ollama_agent(req_id, arguments)
 
+    if name == "linear_list_issues":
+        return handle_linear_list_issues(req_id, arguments)
+    if name == "linear_get_issue":
+        return handle_linear_get_issue(req_id, arguments)
+    if name == "linear_create_issue":
+        return handle_linear_create_issue(req_id, arguments)
+    if name == "linear_update_issue":
+        return handle_linear_update_issue(req_id, arguments)
+    if name == "linear_search_issues":
+        return handle_linear_search_issues(req_id, arguments)
+
     return make_response(req_id, make_tool_text_response(f"Unknown tool: {name}", is_error=True))
 
 
@@ -1178,6 +1267,10 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
                 log("401 Unauthorized: missing token")
                 self.send_response(401)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header(
+                    "WWW-Authenticate",
+                    f'Bearer resource="{BASE_URL}/.well-known/oauth-protected-resource"',
+                )
                 self.end_headers()
                 self.wfile.write(b"Unauthorized")
                 return
@@ -1186,6 +1279,10 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
                 log(f"401 Unauthorized: invalid token")
                 self.send_response(401)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header(
+                    "WWW-Authenticate",
+                    f'Bearer error="invalid_token", resource="{BASE_URL}/.well-known/oauth-protected-resource"',
+                )
                 self.end_headers()
                 self.wfile.write(b"Unauthorized")
                 return
@@ -1299,6 +1396,296 @@ def handle_ollama_agent(req_id, arguments: dict) -> dict:
     task, working_dir = sync_args
     output, is_error = run_ollama_task(task, arguments.get("model", "qwen3.5:latest"), working_dir)
     return make_response(req_id, make_tool_text_response(output, is_error=is_error))
+
+
+# ── Linear helpers ────────────────────────────────────────────────────────────
+
+LINEAR_API_URL = "https://api.linear.app/graphql"
+
+
+def _linear_request(query: str, variables: dict | None = None) -> dict:
+    """發送 Linear GraphQL 請求。回傳 parsed JSON 或拋出 Exception。"""
+    if not LINEAR_API_KEY:
+        raise ValueError("LINEAR_API_KEY not set — add it in Doppler and restart server")
+    payload = {"query": query}
+    if variables:
+        payload["variables"] = variables
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(LINEAR_API_URL, data=data, method="POST")
+    req.add_header("Authorization", f"Bearer {LINEAR_API_KEY}")
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        result = json.loads(resp.read().decode("utf-8"))
+    if "errors" in result:
+        msgs = "; ".join(e.get("message", str(e)) for e in result["errors"])
+        raise ValueError(f"Linear API error: {msgs}")
+    return result.get("data", {})
+
+
+def _linear_issue_text(node: dict) -> str:
+    """把單一 issue node 轉成可讀文字。"""
+    identifier = node.get("identifier", node.get("id", "?"))
+    title = node.get("title", "(no title)")
+    state = (node.get("state") or {}).get("name", "?")
+    priority_map = {0: "No priority", 1: "Urgent", 2: "High", 3: "Medium", 4: "Low"}
+    priority = priority_map.get(node.get("priority", 0), "?")
+    url = node.get("url", "")
+    assignee = (node.get("assignee") or {}).get("name", "Unassigned")
+    return f"[{identifier}] {title}\n  state={state}  priority={priority}  assignee={assignee}\n  {url}"
+
+
+def handle_linear_list_issues(req_id, arguments: dict) -> dict:
+    team_key = arguments.get("team_key", "").strip()
+    state_name = arguments.get("state", "").strip()
+    label_name = arguments.get("label", "").strip()
+    assignee_me = bool(arguments.get("assignee_me", False))
+    limit = min(int(arguments.get("limit", 20)), 50)
+
+    # 組合 filter
+    filters = []
+    if team_key:
+        filters.append(f'team: {{key: {{eq: "{team_key}"}}}}')
+    if state_name:
+        filters.append(f'state: {{name: {{eq: "{state_name}"}}}}')
+    if label_name:
+        filters.append(f'labels: {{name: {{eq: "{label_name}"}}}}')
+    if assignee_me:
+        filters.append('assignee: {isMe: {eq: true}}')
+
+    filter_str = (", ".join(filters)) if filters else ""
+    filter_clause = f"filter: {{{filter_str}}}" if filter_str else ""
+
+    query = f"""
+    query {{
+      issues({filter_clause} first: {limit} orderBy: updatedAt) {{
+        nodes {{
+          id identifier title url priority
+          state {{ name }}
+          assignee {{ name }}
+        }}
+      }}
+    }}
+    """
+    try:
+        data = _linear_request(query)
+        nodes = data.get("issues", {}).get("nodes", [])
+        if not nodes:
+            return make_response(req_id, make_tool_text_response("No issues found."))
+        lines = [f"Found {len(nodes)} issue(s):\n"]
+        for node in nodes:
+            lines.append(_linear_issue_text(node))
+        return make_response(req_id, make_tool_text_response("\n\n".join(lines)))
+    except Exception as exc:
+        return make_response(req_id, make_tool_text_response(f"linear_list_issues error: {exc}", is_error=True))
+
+
+def handle_linear_get_issue(req_id, arguments: dict) -> dict:
+    issue_id = arguments.get("issue_id", "").strip()
+    if not issue_id:
+        return make_response(req_id, make_tool_text_response("Error: issue_id is required", is_error=True))
+
+    query = """
+    query($id: String!) {
+      issue(id: $id) {
+        id identifier title description url priority createdAt updatedAt
+        state { name }
+        assignee { name email }
+        labels { nodes { name } }
+        comments { nodes { body createdAt user { name } } }
+      }
+    }
+    """
+    variables = {"id": issue_id}
+
+    try:
+        data = _linear_request(query, variables)
+        issue = data.get("issue")
+        if not issue:
+            return make_response(req_id, make_tool_text_response(f"Issue not found: {issue_id}", is_error=True))
+
+        priority_map = {0: "No priority", 1: "Urgent", 2: "High", 3: "Medium", 4: "Low"}
+        lines = [
+            f"# [{issue.get('identifier')}] {issue.get('title')}",
+            f"URL: {issue.get('url', '')}",
+            f"State: {(issue.get('state') or {}).get('name', '?')}",
+            f"Priority: {priority_map.get(issue.get('priority', 0), '?')}",
+            f"Assignee: {(issue.get('assignee') or {}).get('name', 'Unassigned')}",
+        ]
+        labels = [n.get("name", "") for n in (issue.get("labels") or {}).get("nodes", [])]
+        if labels:
+            lines.append(f"Labels: {', '.join(labels)}")
+        lines.append(f"Created: {issue.get('createdAt', '')}")
+        lines.append(f"Updated: {issue.get('updatedAt', '')}")
+        desc = (issue.get("description") or "").strip()
+        if desc:
+            lines.extend(["", "## Description", desc])
+        comments = (issue.get("comments") or {}).get("nodes", [])
+        if comments:
+            lines.append("\n## Comments")
+            for c in comments:
+                author = (c.get("user") or {}).get("name", "?")
+                lines.append(f"[{c.get('createdAt', '')}] {author}:\n{c.get('body', '')}")
+        return make_response(req_id, make_tool_text_response("\n".join(lines)))
+    except Exception as exc:
+        return make_response(req_id, make_tool_text_response(f"linear_get_issue error: {exc}", is_error=True))
+
+
+def handle_linear_create_issue(req_id, arguments: dict) -> dict:
+    title = arguments.get("title", "").strip()
+    team_key = arguments.get("team_key", "").strip()
+    if not title:
+        return make_response(req_id, make_tool_text_response("Error: title is required", is_error=True))
+    if not team_key:
+        return make_response(req_id, make_tool_text_response("Error: team_key is required", is_error=True))
+
+    # 先查 team ID
+    try:
+        team_data = _linear_request(
+            'query($key: String!) { teams(filter: {key: {eq: $key}}) { nodes { id } } }',
+            {"key": team_key},
+        )
+        teams = team_data.get("teams", {}).get("nodes", [])
+        if not teams:
+            return make_response(req_id, make_tool_text_response(f"Team not found: {team_key}", is_error=True))
+        team_id = teams[0]["id"]
+    except Exception as exc:
+        return make_response(req_id, make_tool_text_response(f"linear_create_issue error (team lookup): {exc}", is_error=True))
+
+    # 組 input
+    create_input: dict = {"title": title, "teamId": team_id}
+    if arguments.get("description"):
+        create_input["description"] = arguments["description"]
+    if arguments.get("priority") is not None:
+        create_input["priority"] = int(arguments["priority"])
+    if arguments.get("assignee_id"):
+        create_input["assigneeId"] = arguments["assignee_id"]
+
+    # label IDs（如果有傳 label_names）
+    label_names = arguments.get("label_names", [])
+    if label_names:
+        try:
+            label_data = _linear_request(
+                "query { issueLabels { nodes { id name } } }",
+            )
+            all_labels = label_data.get("issueLabels", {}).get("nodes", [])
+            label_ids = [lbl["id"] for lbl in all_labels if lbl.get("name") in label_names]
+            if label_ids:
+                create_input["labelIds"] = label_ids
+        except Exception:
+            pass  # label 查詢失敗不阻斷建立
+
+    mutation = """
+    mutation($input: IssueCreateInput!) {
+      issueCreate(input: $input) {
+        success
+        issue { id identifier title url state { name } }
+      }
+    }
+    """
+    try:
+        data = _linear_request(mutation, {"input": create_input})
+        result = data.get("issueCreate", {})
+        if not result.get("success"):
+            return make_response(req_id, make_tool_text_response("linear_create_issue failed (no success)", is_error=True))
+        issue = result.get("issue", {})
+        text = (
+            f"Issue created: [{issue.get('identifier')}] {issue.get('title')}\n"
+            f"State: {(issue.get('state') or {}).get('name', '?')}\n"
+            f"URL: {issue.get('url', '')}"
+        )
+        return make_response(req_id, make_tool_text_response(text))
+    except Exception as exc:
+        return make_response(req_id, make_tool_text_response(f"linear_create_issue error: {exc}", is_error=True))
+
+
+def handle_linear_update_issue(req_id, arguments: dict) -> dict:
+    issue_id = arguments.get("issue_id", "").strip()
+    if not issue_id:
+        return make_response(req_id, make_tool_text_response("Error: issue_id is required", is_error=True))
+
+    update_input: dict = {}
+    if arguments.get("title"):
+        update_input["title"] = arguments["title"]
+    if arguments.get("description") is not None:
+        update_input["description"] = arguments["description"]
+    if arguments.get("priority") is not None:
+        update_input["priority"] = int(arguments["priority"])
+    if arguments.get("assignee_id"):
+        update_input["assigneeId"] = arguments["assignee_id"]
+
+    # state 名稱 → state ID（需先查 workflow state）
+    state_name = arguments.get("state_name", "").strip()
+    if state_name:
+        try:
+            state_data = _linear_request(
+                'query($name: String!) { workflowStates(filter: {name: {eq: $name}}) { nodes { id } } }',
+                {"name": state_name},
+            )
+            states = state_data.get("workflowStates", {}).get("nodes", [])
+            if states:
+                update_input["stateId"] = states[0]["id"]
+            else:
+                return make_response(req_id, make_tool_text_response(f"State not found: {state_name}", is_error=True))
+        except Exception as exc:
+            return make_response(req_id, make_tool_text_response(f"linear_update_issue error (state lookup): {exc}", is_error=True))
+
+    if not update_input:
+        return make_response(req_id, make_tool_text_response("Error: at least one field to update is required", is_error=True))
+
+    mutation = """
+    mutation($id: String!, $input: IssueUpdateInput!) {
+      issueUpdate(id: $id, input: $input) {
+        success
+        issue { id identifier title url state { name } priority }
+      }
+    }
+    """
+    try:
+        data = _linear_request(mutation, {"id": issue_id, "input": update_input})
+        result = data.get("issueUpdate", {})
+        if not result.get("success"):
+            return make_response(req_id, make_tool_text_response("linear_update_issue failed (no success)", is_error=True))
+        issue = result.get("issue", {})
+        priority_map = {0: "No priority", 1: "Urgent", 2: "High", 3: "Medium", 4: "Low"}
+        text = (
+            f"Issue updated: [{issue.get('identifier')}] {issue.get('title')}\n"
+            f"State: {(issue.get('state') or {}).get('name', '?')}\n"
+            f"Priority: {priority_map.get(issue.get('priority', 0), '?')}\n"
+            f"URL: {issue.get('url', '')}"
+        )
+        return make_response(req_id, make_tool_text_response(text))
+    except Exception as exc:
+        return make_response(req_id, make_tool_text_response(f"linear_update_issue error: {exc}", is_error=True))
+
+
+def handle_linear_search_issues(req_id, arguments: dict) -> dict:
+    query_str = arguments.get("query", "").strip()
+    if not query_str:
+        return make_response(req_id, make_tool_text_response("Error: query is required", is_error=True))
+    limit = min(int(arguments.get("limit", 10)), 25)
+
+    query = """
+    query($term: String!, $first: Int!) {
+      issueSearch(query: $term, first: $first) {
+        nodes {
+          id identifier title url priority
+          state { name }
+          assignee { name }
+        }
+      }
+    }
+    """
+    try:
+        data = _linear_request(query, {"term": query_str, "first": limit})
+        nodes = data.get("issueSearch", {}).get("nodes", [])
+        if not nodes:
+            return make_response(req_id, make_tool_text_response(f"No issues found for: {query_str}"))
+        lines = [f"Found {len(nodes)} issue(s) for \"{query_str}\":\n"]
+        for node in nodes:
+            lines.append(_linear_issue_text(node))
+        return make_response(req_id, make_tool_text_response("\n\n".join(lines)))
+    except Exception as exc:
+        return make_response(req_id, make_tool_text_response(f"linear_search_issues error: {exc}", is_error=True))
 
 
 if __name__ == "__main__":
