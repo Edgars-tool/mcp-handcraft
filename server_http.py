@@ -195,6 +195,37 @@ TOOLS = [
         },
     },
     {
+        "name": "agent_job_list",
+        "description": (
+            "Lists recent background agent jobs. "
+            "Supports optional status filter and limit."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": "Optional status filter: queued, running, succeeded, failed",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max jobs to return (default 20, max 100).",
+                },
+            },
+        },
+    },
+    {
+        "name": "agent_job_cleanup",
+        "description": (
+            "Deletes expired background agent jobs from in-memory storage "
+            "and returns how many records were removed."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
         "name": "smart_agent",
         "description": (
             "Runs a task through a fallback chain of local AI agents. "
@@ -439,13 +470,27 @@ def make_tool_text_response(text: str, *, is_error: bool = False) -> dict:
     }
 
 
-def run_agent_command(command: list[str], cwd: str) -> subprocess.CompletedProcess:
+def run_agent_command(
+    command: list[str],
+    cwd: str,
+    *,
+    env_overrides: dict[str, str | None] | None = None,
+) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    if env_overrides:
+        for key, value in env_overrides.items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
+
     return subprocess.run(
         command,
         capture_output=True,
         text=True,
         timeout=AGENT_TIMEOUT_SECONDS,
         cwd=cwd,
+        env=env,
         shell=False,
     )
 
@@ -511,12 +556,28 @@ def get_job(job_id: str) -> dict | None:
         return dict(job)
 
 
-def cleanup_expired_jobs() -> None:
+def cleanup_expired_jobs() -> int:
     now = time.time()
     with JOBS_LOCK:
         expired_ids = [job_id for job_id, job in JOBS.items() if job.get("expires_at", now) < now]
         for job_id in expired_ids:
             JOBS.pop(job_id, None)
+    return len(expired_ids)
+
+
+def list_jobs(*, status: str | None = None, limit: int = 20) -> list[dict]:
+    if limit <= 0:
+        limit = 20
+    limit = min(limit, 100)
+
+    with JOBS_LOCK:
+        jobs = [dict(job) for job in JOBS.values()]
+
+    if status:
+        jobs = [job for job in jobs if job.get("status") == status]
+
+    jobs.sort(key=lambda item: item.get("created_at", 0), reverse=True)
+    return jobs[:limit]
 
 
 def build_job_status_text(job: dict) -> str:
@@ -681,6 +742,18 @@ def run_claude_code_task(task: str, working_dir: str) -> tuple[str, bool]:
         result = run_agent_command(
             ["cmd.exe", "/c", CLAUDE_CMD, "-p", task, "--output-format", "text"],
             cwd=working_dir,
+            # Force Claude Code to use the locally logged-in first-party account.
+            # Doppler or shell-level Anthropic API settings can otherwise override
+            # OAuth and make claude_code_agent fail with "Invalid API key".
+            env_overrides={
+                "ANTHROPIC_API_KEY": None,
+                "ANTHROPIC_BASE_URL": None,
+                "ANTHROPIC_MODEL": None,
+                "ANTHROPIC_SMALL_FAST_MODEL": None,
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": None,
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": None,
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": None,
+            },
         )
         log(f"claude_code_agent: exit_code={result.returncode}")
 
@@ -790,6 +863,12 @@ def handle_tools_call(req_id, params: dict) -> dict:
     if name == "agent_job_status":
         return handle_agent_job_status(req_id, arguments)
 
+    if name == "agent_job_list":
+        return handle_agent_job_list(req_id, arguments)
+
+    if name == "agent_job_cleanup":
+        return handle_agent_job_cleanup(req_id, arguments)
+
     if name == "smart_agent":
         return handle_smart_agent(req_id, arguments)
 
@@ -865,6 +944,49 @@ def handle_agent_job_status(req_id, arguments: dict) -> dict:
     text = build_job_status_text(job)
     is_error = bool(job.get("is_error")) and job.get("status") == "failed"
     return make_response(req_id, make_tool_text_response(text, is_error=is_error))
+
+
+def handle_agent_job_list(req_id, arguments: dict) -> dict:
+    status = (arguments.get("status") or "").strip()
+    limit_raw = arguments.get("limit", 20)
+
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        return make_response(req_id, make_tool_text_response("Error: limit must be an integer", is_error=True))
+
+    if status and status not in {"queued", "running", "succeeded", "failed"}:
+        return make_response(
+            req_id,
+            make_tool_text_response("Error: status must be one of queued/running/succeeded/failed", is_error=True),
+        )
+
+    cleanup_expired_jobs()
+    jobs = list_jobs(status=status or None, limit=limit)
+
+    if not jobs:
+        filter_text = f" (status={status})" if status else ""
+        return make_response(req_id, make_tool_text_response(f"No jobs found{filter_text}."))
+
+    lines = [f"Found {len(jobs)} job(s):"]
+    for job in jobs:
+        lines.append(
+            " | ".join(
+                [
+                    f"job_id={job.get('job_id', '')}",
+                    f"tool={job.get('tool', '')}",
+                    f"status={job.get('status', '')}",
+                    f"updated_at={job.get('updated_at', 0):.0f}",
+                ]
+            )
+        )
+
+    return make_response(req_id, make_tool_text_response("\n".join(lines)))
+
+
+def handle_agent_job_cleanup(req_id, arguments: dict) -> dict:  # pylint: disable=unused-argument
+    removed = cleanup_expired_jobs()
+    return make_response(req_id, make_tool_text_response(f"Expired jobs removed: {removed}"))
 
 
 def handle_smart_agent(req_id, arguments: dict) -> dict:

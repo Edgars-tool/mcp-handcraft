@@ -34,8 +34,18 @@ claude auth login
 
 如果 `claude` 指令不在 PATH，HTTP tool call 會失敗。
 
+`claude_code_agent` 會優先使用本機 Claude Code 的登入狀態；即使啟動 server 的環境裡有 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_BASE_URL`，也不應再讓它覆蓋訂閱 OAuth。
+
 ## HTTP 版注意事項
 
 - `server_http.py` 目前預設會在 `90` 秒內等 agent 回覆。
 - 這是為了避免 Cloudflare Tunnel 一類的 HTTP 代理先超時，外面只看到空白或中斷。
 - 若要改長一點，可設定環境變數 `MCP_AGENT_TIMEOUT_SECONDS`。
+
+## 本機 smoke test
+
+```powershell
+py -3 -m unittest test_server_http.py
+```
+
+目前 smoke test 會覆蓋 `claude_code_agent` 的 tool schema、缺少 `task`、命令不存在錯誤，以及一個不呼叫真實 Claude Code 的正常呼叫範例。
