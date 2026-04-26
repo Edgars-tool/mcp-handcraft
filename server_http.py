@@ -746,6 +746,7 @@ def run_claude_code_task(task: str, working_dir: str) -> tuple[str, bool]:
             # Doppler or shell-level Anthropic API settings can otherwise override
             # OAuth and make claude_code_agent fail with "Invalid API key".
             env_overrides={
+                "ANTHROPIC_AUTH_TOKEN": None,
                 "ANTHROPIC_API_KEY": None,
                 "ANTHROPIC_BASE_URL": None,
                 "ANTHROPIC_MODEL": None,

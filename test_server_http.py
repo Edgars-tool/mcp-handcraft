@@ -15,7 +15,6 @@ from server_http import (
     handle_claude_code_agent,
     handle_tools_call,
     handle_tools_list,
-    run_claude_code_task,
     list_jobs,
     update_job,
 )
@@ -102,19 +101,28 @@ class ClaudeCodeAgentSmokeTests(unittest.TestCase):
         self.assertTrue(tool_is_error(response))
         self.assertEqual("Error: task is required", tool_text(response))
 
-    def test_claude_code_agent_missing_command_returns_tool_error(self):
+    def test_claude_code_agent_missing_command_returns_tool_call_error(self):
         original_run_agent_command = server_http.run_agent_command
         try:
             def raise_file_not_found(*args, **kwargs):
                 raise FileNotFoundError
 
             server_http.run_agent_command = raise_file_not_found
-            output, is_error = run_claude_code_task("say hi", "C:/tmp")
+            response = handle_tools_call(
+                req_id=1,
+                params={
+                    "name": "claude_code_agent",
+                    "arguments": {
+                        "task": "say hi",
+                        "working_dir": "C:/tmp",
+                    },
+                },
+            )
         finally:
             server_http.run_agent_command = original_run_agent_command
 
-        self.assertTrue(is_error)
-        self.assertIn("Error: claude command not found", output)
+        self.assertTrue(tool_is_error(response))
+        self.assertIn("Error: claude command not found", tool_text(response))
 
     def test_claude_code_agent_normal_tool_call_example(self):
         completed = subprocess.CompletedProcess(
@@ -152,6 +160,8 @@ class ClaudeCodeAgentSmokeTests(unittest.TestCase):
         command = args[0]
         self.assertEqual(["cmd.exe", "/c", server_http.CLAUDE_CMD, "-p", "say hi", "--output-format", "text"], command)
         self.assertEqual("C:/tmp", kwargs["cwd"])
+        self.assertIsNone(kwargs["env_overrides"]["ANTHROPIC_AUTH_TOKEN"])
+        self.assertIsNone(kwargs["env_overrides"]["ANTHROPIC_API_KEY"])
 
 
 if __name__ == "__main__":
