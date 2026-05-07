@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 import fnmatch
 import platform
+import re
 import string
 import datetime
 from pathlib import Path
@@ -48,6 +49,7 @@ OPENAI_API_KEY      = os.getenv("OPENAI_API_KEY", "")
 LINEAR_API_KEY      = os.getenv("LINEAR_API_KEY", "")
 
 SCREENSHOTS_DIR = Path(r"C:\Users\EdgarsTool\Projects\mcp-handcraft\.screenshots")
+VAULT_ROOT      = Path(r"D:\Edgar'sObsidianVault")
 
 CODEX_CMD = r"C:\Users\EdgarsTool\AppData\Roaming\npm\codex.cmd"
 CLAUDE_CMD = shutil.which("claude") or "claude"
@@ -651,6 +653,138 @@ TOOLS = [
             "required": ["url", "script"],
         },
     },
+    # ── Obsidian Vault 工具 ───────────────────────────────────────────────────
+    {
+        "name": "vault_read",
+        "description": "Read an Obsidian note by relative path (e.g. '00 Inbox/my-note.md').",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative path inside vault"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "vault_write",
+        "description": "Create or overwrite an Obsidian note. Creates parent folders automatically.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path":    {"type": "string", "description": "Relative path inside vault"},
+                "content": {"type": "string", "description": "Full markdown content"},
+            },
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "vault_append",
+        "description": "Append text to an existing Obsidian note (adds a newline before appended content).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path":    {"type": "string", "description": "Relative path inside vault"},
+                "content": {"type": "string", "description": "Text to append"},
+            },
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "vault_list",
+        "description": "List files and folders inside a vault directory.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative folder path (default: vault root)"},
+            },
+        },
+    },
+    {
+        "name": "vault_search",
+        "description": "Full-text search across all .md files in the vault. Returns matching file paths and context snippets.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query":       {"type": "string", "description": "Text to search for"},
+                "max_results": {"type": "integer", "description": "Max results (default: 20)"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "vault_delete",
+        "description": "Delete a vault note (moves to vault .trash folder, recoverable from Obsidian).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative path inside vault"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "vault_move",
+        "description": "Move or rename a vault note.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "src": {"type": "string", "description": "Source relative path"},
+                "dst": {"type": "string", "description": "Destination relative path"},
+            },
+            "required": ["src", "dst"],
+        },
+    },
+    {
+        "name": "vault_daily_note",
+        "description": "Get or create today's daily note in 00 Inbox/Daily/YYYY-MM-DD.md with the Daily Notes template.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "date": {"type": "string", "description": "Date in YYYY-MM-DD format (default: today)"},
+            },
+        },
+    },
+    {
+        "name": "vault_recent",
+        "description": "List the most recently modified notes in the vault.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit":  {"type": "integer", "description": "Number of notes (default: 15)"},
+                "folder": {"type": "string",  "description": "Limit to a subfolder (optional)"},
+            },
+        },
+    },
+    {
+        "name": "vault_tasks",
+        "description": "Find all unchecked tasks (- [ ]) across the vault. Useful for a global TODO overview.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "folder": {"type": "string", "description": "Limit search to a subfolder (optional)"},
+                "limit":  {"type": "integer", "description": "Max tasks to return (default: 50)"},
+            },
+        },
+    },
+    {
+        "name": "vault_tags",
+        "description": "List all tags used across the vault with their counts.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "vault_create_from_template",
+        "description": "Create a new note from a vault template. Available templates: Daily Notes, Project, Learning Project, Research Clipping, Service Subscription, Meeting Notes, Weekly Review, Decision Record.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "template": {"type": "string", "description": "Template name (e.g. 'Project', 'Meeting Notes')"},
+                "title":    {"type": "string", "description": "Note title (used as filename and in content)"},
+                "folder":   {"type": "string", "description": "Destination folder (default: 00 Inbox)"},
+                "fields":   {"type": "object", "description": "Key-value pairs to fill in template variables"},
+            },
+            "required": ["template", "title"],
+        },
+    },
     # ── 免費圖片生成（Pollinations.AI，不需 API key）─────────────────────────
     {
         "name": "image_generate_free",
@@ -1222,6 +1356,20 @@ def handle_tools_call(req_id, params: dict) -> dict:
         return handle_browser_get_text(req_id, arguments)
     if name == "browser_run_script":
         return handle_browser_run_script(req_id, arguments)
+
+    # ── Obsidian
+    if name == "vault_read":              return handle_vault_read(req_id, arguments)
+    if name == "vault_write":             return handle_vault_write(req_id, arguments)
+    if name == "vault_append":            return handle_vault_append(req_id, arguments)
+    if name == "vault_list":              return handle_vault_list(req_id, arguments)
+    if name == "vault_search":            return handle_vault_search(req_id, arguments)
+    if name == "vault_delete":            return handle_vault_delete(req_id, arguments)
+    if name == "vault_move":              return handle_vault_move(req_id, arguments)
+    if name == "vault_daily_note":        return handle_vault_daily_note(req_id, arguments)
+    if name == "vault_recent":            return handle_vault_recent(req_id, arguments)
+    if name == "vault_tasks":             return handle_vault_tasks(req_id, arguments)
+    if name == "vault_tags":              return handle_vault_tags(req_id, arguments)
+    if name == "vault_create_from_template": return handle_vault_create_from_template(req_id, arguments)
 
     # ── 免費圖片生成
     if name == "image_generate_free":
@@ -2093,6 +2241,599 @@ def handle_git_commit(req_id, arguments: dict) -> dict:
     return make_response(req_id, make_tool_text_response(
         f"Stage:\n{add_out}\n\nCommit:\n{commit_out}", is_error=commit_err
     ))
+
+
+# ─── Obsidian Vault Handlers ─────────────────────────────────────────────────
+
+def _vault_path(rel: str) -> Path:
+    """Resolve relative vault path, block path traversal."""
+    p = (VAULT_ROOT / rel).resolve()
+    if not str(p).startswith(str(VAULT_ROOT.resolve())):
+        raise ValueError(f"Path outside vault: {rel}")
+    return p
+
+
+def handle_vault_read(req_id, arguments: dict) -> dict:
+    path = arguments.get("path", "").strip()
+    if not path:
+        return make_response(req_id, make_tool_text_response("Error: path is required", is_error=True))
+    try:
+        p = _vault_path(path)
+        if not p.exists():
+            return make_response(req_id, make_tool_text_response(f"Not found: {path}", is_error=True))
+        content = p.read_text(encoding="utf-8", errors="replace")
+        return make_response(req_id, make_tool_text_response(f"# {path}\n---\n{content}"))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_vault_write(req_id, arguments: dict) -> dict:
+    path    = arguments.get("path", "").strip()
+    content = arguments.get("content", "")
+    if not path:
+        return make_response(req_id, make_tool_text_response("Error: path is required", is_error=True))
+    try:
+        p = _vault_path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        return make_response(req_id, make_tool_text_response(f"Written: {path} ({p.stat().st_size:,} bytes)"))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_vault_append(req_id, arguments: dict) -> dict:
+    path    = arguments.get("path", "").strip()
+    content = arguments.get("content", "")
+    if not path:
+        return make_response(req_id, make_tool_text_response("Error: path is required", is_error=True))
+    try:
+        p = _vault_path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write("\n" + content)
+        return make_response(req_id, make_tool_text_response(f"Appended to: {path}"))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_vault_list(req_id, arguments: dict) -> dict:
+    rel = arguments.get("path", "").strip() or "."
+    try:
+        p = _vault_path(rel)
+        if not p.is_dir():
+            return make_response(req_id, make_tool_text_response(f"Not a directory: {rel}", is_error=True))
+        entries = []
+        for item in sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name.lower())):
+            if item.name.startswith("."):
+                continue
+            kind = "📁" if item.is_dir() else "📄"
+            entries.append(f"{kind} {item.name}")
+        body = "\n".join(entries) if entries else "(empty)"
+        return make_response(req_id, make_tool_text_response(f"Vault/{rel}\n{'─'*40}\n{body}"))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_vault_search(req_id, arguments: dict) -> dict:
+    query       = arguments.get("query", "").strip()
+    max_results = int(arguments.get("max_results", 20))
+    if not query:
+        return make_response(req_id, make_tool_text_response("Error: query is required", is_error=True))
+    try:
+        results = []
+        query_lower = query.lower()
+        for md_file in VAULT_ROOT.rglob("*.md"):
+            if any(part.startswith(".") for part in md_file.parts):
+                continue
+            try:
+                text = md_file.read_text(encoding="utf-8", errors="replace")
+                if query_lower in text.lower():
+                    rel = md_file.relative_to(VAULT_ROOT)
+                    # Find snippet
+                    idx = text.lower().find(query_lower)
+                    start = max(0, idx - 60)
+                    snippet = text[start:idx + 100].replace("\n", " ").strip()
+                    results.append(f"📄 {rel}\n   …{snippet}…")
+                    if len(results) >= max_results:
+                        break
+            except (PermissionError, OSError):
+                pass
+        if not results:
+            return make_response(req_id, make_tool_text_response(f"No results for: {query}"))
+        return make_response(req_id, make_tool_text_response(
+            f"Found {len(results)} note(s) matching '{query}':\n\n" + "\n\n".join(results)
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_vault_delete(req_id, arguments: dict) -> dict:
+    path = arguments.get("path", "").strip()
+    if not path:
+        return make_response(req_id, make_tool_text_response("Error: path is required", is_error=True))
+    try:
+        p = _vault_path(path)
+        if not p.exists():
+            return make_response(req_id, make_tool_text_response(f"Not found: {path}", is_error=True))
+        trash = VAULT_ROOT / ".trash"
+        trash.mkdir(exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest = trash / f"{ts}_{p.name}"
+        shutil.move(str(p), str(dest))
+        return make_response(req_id, make_tool_text_response(f"Moved to vault .trash: {path}"))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_vault_move(req_id, arguments: dict) -> dict:
+    src = arguments.get("src", "").strip()
+    dst = arguments.get("dst", "").strip()
+    if not src or not dst:
+        return make_response(req_id, make_tool_text_response("Error: src and dst are required", is_error=True))
+    try:
+        src_p = _vault_path(src)
+        dst_p = _vault_path(dst)
+        if not src_p.exists():
+            return make_response(req_id, make_tool_text_response(f"Not found: {src}", is_error=True))
+        dst_p.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src_p), str(dst_p))
+        return make_response(req_id, make_tool_text_response(f"Moved: {src} → {dst}"))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_vault_daily_note(req_id, arguments: dict) -> dict:
+    date_str = arguments.get("date", "").strip() or datetime.datetime.now().strftime("%Y-%m-%d")
+    try:
+        dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+        week = dt.isocalendar()[1]
+        day_name = dt.strftime("%A")
+        rel_path = f"00 Inbox/Daily/{date_str}.md"
+        p = _vault_path(rel_path)
+
+        if p.exists():
+            content = p.read_text(encoding="utf-8", errors="replace")
+            return make_response(req_id, make_tool_text_response(
+                f"Daily note already exists: {rel_path}\n---\n{content}"
+            ))
+
+        # Create from template
+        content = f"""---
+date: {date_str}
+week: W{week:02d}
+day: {day_name}
+tags:
+  - daily
+---
+
+# {date_str} {day_name}
+
+## 🎯 今日主線
+-
+
+## ✅ 手動任務
+- [ ]
+- [ ]
+
+## 🤖 Agent 對話摘要
+-
+
+## 💡 筆記 / 想法
+-
+
+## 📊 今日回顧
+- **完成了：**
+- **卡住了：**
+- **明天優先：**
+"""
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        return make_response(req_id, make_tool_text_response(
+            f"Daily note created: {rel_path}\n---\n{content}"
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_vault_recent(req_id, arguments: dict) -> dict:
+    limit  = int(arguments.get("limit", 15))
+    folder = arguments.get("folder", "").strip()
+    try:
+        root = _vault_path(folder) if folder else VAULT_ROOT
+        files = [
+            f for f in root.rglob("*.md")
+            if not any(part.startswith(".") for part in f.parts)
+        ]
+        files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        lines = []
+        for f in files[:limit]:
+            rel  = f.relative_to(VAULT_ROOT)
+            mtime = datetime.datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            lines.append(f"{mtime}  {rel}")
+        return make_response(req_id, make_tool_text_response(
+            f"Recently modified ({len(lines)} notes):\n\n" + "\n".join(lines)
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_vault_tasks(req_id, arguments: dict) -> dict:
+    folder = arguments.get("folder", "").strip()
+    limit  = int(arguments.get("limit", 50))
+    try:
+        root = _vault_path(folder) if folder else VAULT_ROOT
+        tasks = []
+        for md_file in root.rglob("*.md"):
+            if any(part.startswith(".") for part in md_file.parts):
+                continue
+            try:
+                rel = md_file.relative_to(VAULT_ROOT)
+                for i, line in enumerate(md_file.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                    if "- [ ]" in line:
+                        tasks.append(f"[ ] {line.strip().replace('- [ ]', '').strip()}  ← {rel}:{i}")
+                        if len(tasks) >= limit:
+                            break
+            except (PermissionError, OSError):
+                pass
+            if len(tasks) >= limit:
+                break
+        if not tasks:
+            return make_response(req_id, make_tool_text_response("No unchecked tasks found! 🎉"))
+        return make_response(req_id, make_tool_text_response(
+            f"Unchecked tasks ({len(tasks)}):\n\n" + "\n".join(tasks)
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_vault_tags(req_id, arguments: dict) -> dict:
+    try:
+        tag_counts: dict[str, int] = {}
+        for md_file in VAULT_ROOT.rglob("*.md"):
+            if any(part.startswith(".") for part in md_file.parts):
+                continue
+            try:
+                text = md_file.read_text(encoding="utf-8", errors="replace")
+                for tag in re.findall(r"(?<!\w)#([A-Za-z0-9_\-/一-鿿]+)", text):
+                    tag_counts[tag] = tag_counts.get(tag, 0) + 1
+            except (PermissionError, OSError):
+                pass
+        if not tag_counts:
+            return make_response(req_id, make_tool_text_response("No tags found in vault."))
+        sorted_tags = sorted(tag_counts.items(), key=lambda x: -x[1])
+        lines = [f"#{tag}  ({count})" for tag, count in sorted_tags]
+        return make_response(req_id, make_tool_text_response(
+            f"Vault tags ({len(lines)} unique):\n\n" + "\n".join(lines)
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+# ── Template definitions (Templater syntax stripped, use simple vars) ────────
+_VAULT_TEMPLATES: dict[str, str] = {
+    "Daily Notes": """---
+date: {date}
+week: W{week}
+day: {day}
+tags:
+  - daily
+---
+
+# {date} {day}
+
+## 🎯 今日主線
+- {title}
+
+## ✅ 手動任務
+- [ ]
+- [ ]
+
+## 🤖 Agent 對話摘要
+-
+
+## 💡 筆記 / 想法
+-
+
+## 📊 今日回顧
+- **完成了：**
+- **卡住了：**
+- **明天優先：**
+""",
+    "Project": """---
+project: {title}
+linear_id: {linear_id}
+status: 進行中
+priority: {priority}
+started: {date}
+tags:
+  - project
+---
+
+# {title}
+
+## 一、目標 Goal
+{goal}
+
+## 二、背景 Context
+
+## 三、已凍結方案 Decision
+> ⚠️ 尚未凍結
+
+## 四、執行步驟 Plan
+- [ ] Step 1：
+- [ ] Step 2：
+- [ ] Step 3：
+
+## 五、進度 Status
+| 日期 | 完成 | 備註 |
+|------|------|------|
+| {date} | - | 建立 |
+
+## 六、產出 Outputs
+
+## 七、風險 Risks
+
+## 八、下一步 Next
+
+---
+
+## Summary
+
+## Related
+-
+""",
+    "Meeting Notes": """---
+date: {date}
+attendees: {attendees}
+topic: {title}
+tags:
+  - meeting
+---
+
+# 會議記錄：{title}
+
+**日期：** {date}
+**出席：** {attendees}
+
+## 📋 議程
+-
+
+## 🗣️ 討論重點
+-
+
+## ✅ 決議事項
+-
+
+## 🔜 後續行動
+| 事項 | 負責人 | 截止 |
+|------|-------|------|
+|  |  |  |
+
+## 💡 備註
+
+## Related
+-
+""",
+    "Weekly Review": """---
+week: W{week}
+date_start: {date}
+tags:
+  - weekly-review
+---
+
+# 週回顧 W{week}
+
+## ✅ 本週完成了什麼
+-
+
+## 🔴 卡住了什麼
+-
+
+## 💡 本週學到的
+-
+
+## 📊 指標回顧
+| 指標 | 目標 | 實際 |
+|------|------|------|
+| Linear 完成 issue |  |  |
+| 新寫筆記 |  |  |
+
+## 🎯 下週優先
+1.
+2.
+3.
+
+## 💬 給下週的自己
+
+""",
+    "Decision Record": """---
+date: {date}
+decision: {title}
+status: 提案中
+tags:
+  - decision
+  - adr
+---
+
+# 決策記錄：{title}
+
+**日期：** {date}
+**狀態：** 提案中 → 進行中 → 已凍結 → 廢棄
+
+## 背景
+為什麼需要做這個決定？
+
+## 選項
+| 選項 | 優點 | 缺點 |
+|------|------|------|
+| A |  |  |
+| B |  |  |
+
+## 決策
+選擇：**{title}**
+
+理由：
+
+## 後果
+- 預期：
+- 風險：
+
+## Related
+-
+""",
+    "Research Clipping": """---
+title: {title}
+source: {source}
+captured: {date}
+tags:
+  - clipping
+  - research
+---
+
+# {title}
+
+> 來源：{source}
+> 擷取：{date}
+
+## 核心摘要
+1.
+2.
+3.
+
+## 重點筆記
+-
+
+## 我的想法
+-
+
+## 行動項目
+- [ ]
+
+## Related
+-
+""",
+    "Learning Project": """---
+topic: {title}
+status: 進行中
+started: {date}
+tags:
+  - learning
+---
+
+# {title}
+
+## 🎯 學習目標
+-
+
+## 📚 來源資料
+- 來源：{source}
+
+## 🗺️ 學習地圖
+- [ ] Checkpoint 1：
+- [ ] Checkpoint 2：
+- [ ] Checkpoint 3：
+
+## 📝 筆記
+
+### 核心概念
+
+### 實作紀錄
+
+### 卡點與解法
+
+## 💡 我的結論 / 心得
+
+## Related
+-
+""",
+    "Service Subscription": """---
+service: {title}
+plan: {plan}
+cost: {cost}
+renewal: {renewal}
+status: 進行中
+tags:
+  - service
+  - subscription
+---
+
+# {title}
+
+## 基本資訊
+| 項目 | 內容 |
+|------|------|
+| 方案 | {plan} |
+| 費用 | {cost} |
+| 續費日 | {renewal} |
+| 帳號 | |
+
+## 目前用途
+-
+
+## 評估
+- **值得繼續？**
+- **可以替代的方案：**
+
+## Related
+-
+""",
+}
+
+
+def handle_vault_create_from_template(req_id, arguments: dict) -> dict:
+    template_name = arguments.get("template", "").strip()
+    title         = arguments.get("title", "").strip()
+    folder        = arguments.get("folder", "00 Inbox").strip()
+    fields        = arguments.get("fields", {}) or {}
+
+    if not template_name or not title:
+        return make_response(req_id, make_tool_text_response("Error: template and title are required", is_error=True))
+
+    # Fuzzy match template name
+    match = next(
+        (k for k in _VAULT_TEMPLATES if template_name.lower() in k.lower()),
+        None
+    )
+    if not match:
+        available = ", ".join(_VAULT_TEMPLATES.keys())
+        return make_response(req_id, make_tool_text_response(
+            f"Template '{template_name}' not found.\nAvailable: {available}", is_error=True
+        ))
+
+    now   = datetime.datetime.now()
+    week  = now.isocalendar()[1]
+    day   = now.strftime("%A")
+    today = now.strftime("%Y-%m-%d")
+
+    vars_: dict[str, str] = {
+        "title": title, "date": today, "week": f"{week:02d}",
+        "day": day, "goal": "", "linear_id": "", "priority": "P2",
+        "attendees": "", "source": "", "plan": "", "cost": "", "renewal": "",
+    }
+    vars_.update({k: str(v) for k, v in fields.items()})
+
+    try:
+        content = _VAULT_TEMPLATES[match].format_map(vars_)
+    except KeyError as missing:
+        content = _VAULT_TEMPLATES[match]  # Fallback: use raw template
+
+    safe_title = re.sub(r'[\\/:*?"<>|]', "-", title)
+    rel_path   = f"{folder}/{safe_title}.md"
+    p          = _vault_path(rel_path)
+
+    if p.exists():
+        return make_response(req_id, make_tool_text_response(
+            f"Note already exists: {rel_path}\nUse vault_write to overwrite."
+        ))
+
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        return make_response(req_id, make_tool_text_response(
+            f"Created from template '{match}': {rel_path}\n---\n{content}"
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
 
 
 # ─── Free Image Generation (Pollinations.AI) ─────────────────────────────────
