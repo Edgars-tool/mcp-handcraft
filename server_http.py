@@ -785,6 +785,24 @@ TOOLS = [
             "required": ["template", "title"],
         },
     },
+    {
+        "name": "vault_sort_inbox",
+        "description": (
+            "自動掃描 Obsidian Vault 的 00 Inbox，判斷每個散落筆記的分類，"
+            "批次搬移到正確的 PARA 資料夾（01 Projects / 02 Areas / 03 Resources / 04 Archive）。"
+            "不會動 Daily Notes 子資料夾和 Don't Touch 子資料夾。"
+            "完成後回傳搬移清單。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "若為 true，只列出分類結果但不實際搬移（預設 false）",
+                },
+            },
+        },
+    },
     # ── 免費圖片生成（Pollinations.AI，不需 API key）─────────────────────────
     {
         "name": "image_generate_free",
@@ -1370,6 +1388,7 @@ def handle_tools_call(req_id, params: dict) -> dict:
     if name == "vault_tasks":             return handle_vault_tasks(req_id, arguments)
     if name == "vault_tags":              return handle_vault_tags(req_id, arguments)
     if name == "vault_create_from_template": return handle_vault_create_from_template(req_id, arguments)
+    if name == "vault_sort_inbox":           return handle_vault_sort_inbox(req_id, arguments)
 
     # ── 免費圖片生成
     if name == "image_generate_free":
@@ -2834,6 +2853,97 @@ def handle_vault_create_from_template(req_id, arguments: dict) -> dict:
         ))
     except Exception as e:
         return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+# ─── Vault Sort Inbox ─────────────────────────────────────────────────────────
+
+# 分類規則：關鍵字 → 目標資料夾
+_INBOX_RULES: list[tuple[list[str], str]] = [
+    # 01 Projects
+    (["project", "專案", "企劃", "建置", "規劃", "sprint", "milestone"], "01 Projects"),
+    # 02 Areas（持續維護的領域）
+    (["agent", "代理", "架構", "架構記錄", "architecture", "環境", "baseline",
+      "hermes", "openclaw", "ollama", "ai工具", "報告", "記憶", "mem0",
+      "heartbeat", "每日", "daily", "區", "狀態", "status"], "02 Areas"),
+    # 03 Resources（參考資料、指令、指南）
+    (["指令", "cli", "command", "指南", "guide", "教學", "tutorial", "sync",
+      "api", "設定", "config", "連線", "network", "語言", "程式", "code",
+      "tool", "工具", "resource", "clipping", "參考", "說明", "手冊"], "03 Resources"),
+    # 04 Archive（舊驗證、對話紀錄、已完成）
+    (["verify", "驗證", "archive", "封存", "紀錄整理", "對話", "結果",
+      "2026-0", "2025-", "old", "舊"], "04 Archive"),
+]
+
+def _classify_inbox_note(filename: str, content_snippet: str) -> str:
+    """根據檔名和內容前200字判斷目標 PARA 資料夾。"""
+    text = (filename + " " + content_snippet).lower()
+    for keywords, folder in _INBOX_RULES:
+        for kw in keywords:
+            if kw.lower() in text:
+                return folder
+    return "02 Areas"  # 預設：有內容就放 Areas
+
+
+def handle_vault_sort_inbox(req_id, arguments: dict) -> dict:
+    dry_run = bool(arguments.get("dry_run", False))
+    inbox   = VAULT_ROOT / "00 Inbox"
+    skip_dirs = {"daily notes", "don't touch", "daily"}
+
+    if not inbox.exists():
+        return make_response(req_id, make_tool_text_response("Error: 00 Inbox not found", is_error=True))
+
+    moves: list[tuple[Path, Path, str]] = []  # (src, dst, reason)
+    skipped: list[str] = []
+
+    for item in sorted(inbox.iterdir()):
+        # 跳過子資料夾（只處理根層散落的 .md 檔）
+        if item.is_dir():
+            if item.name.lower() not in skip_dirs:
+                skipped.append(f"[子資料夾跳過] {item.name}/")
+            continue
+        if item.suffix.lower() != ".md":
+            skipped.append(f"[非md跳過] {item.name}")
+            continue
+
+        # 讀前200字做分類
+        try:
+            snippet = item.read_text(encoding="utf-8", errors="ignore")[:200]
+        except Exception:
+            snippet = ""
+
+        target_folder = _classify_inbox_note(item.stem, snippet)
+        dst = VAULT_ROOT / target_folder / item.name
+        moves.append((item, dst, target_folder))
+
+    if not moves:
+        return make_response(req_id, make_tool_text_response(
+            "✅ 00 Inbox 沒有散落的 .md 檔需要整理。" +
+            (f"\n\n跳過項目：\n" + "\n".join(skipped) if skipped else "")
+        ))
+
+    lines = ["**vault_sort_inbox 結果**", f"模式：{'dry_run（只列出，不搬）' if dry_run else '實際搬移'}", ""]
+    errors = []
+
+    for src, dst, folder in moves:
+        label = f"  {src.name}  →  {folder}/"
+        if dry_run:
+            lines.append(f"[預覽] {label}")
+        else:
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+                lines.append(f"✅ {label}")
+            except Exception as e:
+                lines.append(f"❌ {label}  ({e})")
+                errors.append(str(e))
+
+    if skipped:
+        lines += ["", "**跳過（不動）：**"] + [f"  {s}" for s in skipped]
+
+    summary = f"\n共 {len(moves)} 個{'預覽' if dry_run else '已搬移'}，{len(errors)} 個失敗。"
+    lines.append(summary)
+
+    return make_response(req_id, make_tool_text_response("\n".join(lines)))
 
 
 # ─── Free Image Generation (Pollinations.AI) ─────────────────────────────────
