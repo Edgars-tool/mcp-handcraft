@@ -18,6 +18,11 @@ import uuid
 import shutil
 import urllib.parse
 import urllib.request
+import fnmatch
+import platform
+import string
+import datetime
+from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from mmx_handlers import DISPATCH, hmi, hmvd, hms, hmu, hmv, hmsq, hmc, hmq
@@ -36,8 +41,13 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 # ── Secrets（由 Doppler 注入）─────────────────────────────────────────────────
-NOTION_API_KEY = os.getenv("NOTION_API_KEY", "")
-API_TOKEN = os.getenv("MCP_API_TOKEN", "")
+NOTION_API_KEY      = os.getenv("NOTION_API_KEY", "")
+API_TOKEN           = os.getenv("MCP_API_TOKEN", "")
+PERPLEXITY_API_KEY  = os.getenv("PERPLEXITY_API_KEY", "")
+OPENAI_API_KEY      = os.getenv("OPENAI_API_KEY", "")
+LINEAR_API_KEY      = os.getenv("LINEAR_API_KEY", "")
+
+SCREENSHOTS_DIR = Path(r"C:\Users\EdgarsTool\Projects\mcp-handcraft\.screenshots")
 
 CODEX_CMD = r"C:\Users\EdgarsTool\AppData\Roaming\npm\codex.cmd"
 CLAUDE_CMD = shutil.which("claude") or "claude"
@@ -439,6 +449,278 @@ TOOLS = [
                 "working_dir": {"type": "string", "description": f"Working directory (default: {CODEX_DEFAULT_WORKDIR})"},
             },
             "required": ["task"],
+        },
+    },
+    # ── 檔案系統工具 ──────────────────────────────────────────────────────────
+    {
+        "name": "fs_list",
+        "description": "List directory contents with file sizes, types, and modification dates.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Directory path to list"},
+                "show_hidden": {"type": "boolean", "description": "Include hidden files/folders (default: false)"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "fs_read",
+        "description": "Read the contents of a file. Truncates at max_lines to avoid overloading context.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to read"},
+                "max_lines": {"type": "integer", "description": "Max lines to return (default: 200)"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "fs_write",
+        "description": "Write or create a file. Can append to existing file.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to write"},
+                "content": {"type": "string", "description": "Content to write"},
+                "append": {"type": "boolean", "description": "Append instead of overwrite (default: false)"},
+            },
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "fs_move",
+        "description": "Move or rename a file or folder.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "src": {"type": "string", "description": "Source path"},
+                "dst": {"type": "string", "description": "Destination path"},
+            },
+            "required": ["src", "dst"],
+        },
+    },
+    {
+        "name": "fs_delete",
+        "description": "Safely delete a file or folder by moving it to a trash folder (C:\\Users\\EdgarsTool\\.mcp-trash). NOT permanent — can be recovered manually.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File or folder path to delete (moved to trash)"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "fs_search",
+        "description": "Search for files by name pattern (glob) and optionally by content substring.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "directory": {"type": "string", "description": "Root directory to search in"},
+                "pattern": {"type": "string", "description": "Filename glob pattern (e.g. '*.py', '*.md', default: '*')"},
+                "search_content": {"type": "string", "description": "Optional substring to search inside file contents"},
+                "max_results": {"type": "integer", "description": "Max results to return (default: 50)"},
+            },
+            "required": ["directory"],
+        },
+    },
+    {
+        "name": "fs_disk_info",
+        "description": "Show disk usage for all drives (used/free/total space with visual bar).",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    # ── 系統工具 ──────────────────────────────────────────────────────────────
+    {
+        "name": "sys_run",
+        "description": "Run a PowerShell command on the local machine and return output. Timeout max 120s. Dangerous patterns are blocked.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "PowerShell command to execute"},
+                "working_dir": {"type": "string", "description": "Working directory (default: user home)"},
+                "timeout": {"type": "integer", "description": "Timeout in seconds (default: 30, max: 120)"},
+            },
+            "required": ["command"],
+        },
+    },
+    {
+        "name": "sys_info",
+        "description": "Get system information: CPU, RAM usage, OS version.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "sys_processes",
+        "description": "List running processes sorted by memory or CPU usage.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Number of processes to return (default: 20)"},
+                "sort_by": {"type": "string", "description": "Sort by: 'memory' (default), 'cpu', or 'name'"},
+            },
+        },
+    },
+    # ── Git 工具 ─────────────────────────────────────────────────────────────
+    {
+        "name": "git_status",
+        "description": "Show git working tree status for a repository.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string", "description": f"Repo path (default: {CODEX_DEFAULT_WORKDIR})"},
+            },
+        },
+    },
+    {
+        "name": "git_log",
+        "description": "Show recent git commit history (one-line format).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string", "description": "Repo path"},
+                "limit": {"type": "integer", "description": "Number of commits (default: 10)"},
+            },
+        },
+    },
+    {
+        "name": "git_diff",
+        "description": "Show git diff summary (changed files and line counts).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string", "description": "Repo path"},
+                "staged": {"type": "boolean", "description": "Show staged diff (default: false = unstaged)"},
+            },
+        },
+    },
+    {
+        "name": "git_commit",
+        "description": "Stage files and create a git commit.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string", "description": "Repo path"},
+                "message": {"type": "string", "description": "Commit message"},
+                "files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Files to stage (empty = git add -A for all changes)",
+                },
+            },
+            "required": ["message"],
+        },
+    },
+    # ── Playwright 瀏覽器工具 ─────────────────────────────────────────────────
+    {
+        "name": "browser_screenshot",
+        "description": "Open a URL in headless Chromium, wait for load, save a screenshot PNG, and return the file path.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to open"},
+                "wait_ms": {"type": "integer", "description": "Extra wait after load in ms (default: 2000)"},
+                "full_page": {"type": "boolean", "description": "Capture full page scroll height (default: false)"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "browser_get_text",
+        "description": "Fetch a URL in headless Chromium and return the visible text content of the page (or a CSS selector).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to open"},
+                "selector": {"type": "string", "description": "CSS selector to extract text from (default: body)"},
+                "wait_ms": {"type": "integer", "description": "Extra wait after load in ms (default: 1000)"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "browser_run_script",
+        "description": "Navigate to a URL and run JavaScript, returning the result. Useful for scraping or checking page state.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to open"},
+                "script": {"type": "string", "description": "JavaScript to evaluate (return value is serialized to JSON)"},
+                "wait_ms": {"type": "integer", "description": "Extra wait after load (default: 1000)"},
+            },
+            "required": ["url", "script"],
+        },
+    },
+    # ── 免費圖片生成（Pollinations.AI，不需 API key）─────────────────────────
+    {
+        "name": "image_generate_free",
+        "description": (
+            "Generate an image for FREE using Pollinations.AI (no API key needed). "
+            "Saves PNG to .screenshots/ and returns the file path. "
+            "Models: flux (default, best quality), turbo (fast), gptimage."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Image description prompt"},
+                "width":  {"type": "integer", "description": "Width in px (default: 1024)"},
+                "height": {"type": "integer", "description": "Height in px (default: 1024)"},
+                "model":  {"type": "string",  "description": "Model: flux (default) | turbo | gptimage"},
+                "seed":   {"type": "integer", "description": "Seed for reproducibility (optional)"},
+            },
+            "required": ["prompt"],
+        },
+    },
+    # ── Web Search ────────────────────────────────────────────────────────────
+    {
+        "name": "web_search",
+        "description": "Search the web using Perplexity AI and return a summarized answer with sources.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+            },
+            "required": ["query"],
+        },
+    },
+    # ── Linear 工具 ───────────────────────────────────────────────────────────
+    {
+        "name": "linear_issues",
+        "description": "List Linear issues. Filter by state name (e.g. 'In Progress', 'Todo', 'Done').",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "state": {"type": "string", "description": "Filter by state name (optional)"},
+                "limit": {"type": "integer", "description": "Number of issues (default: 10)"},
+                "assignee_me": {"type": "boolean", "description": "Only show issues assigned to me (default: false)"},
+            },
+        },
+    },
+    {
+        "name": "linear_create_issue",
+        "description": "Create a new Linear issue.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Issue title"},
+                "description": {"type": "string", "description": "Issue description (markdown)"},
+                "team_name": {"type": "string", "description": "Team name (default: first team found)"},
+                "priority": {"type": "integer", "description": "Priority 0=none 1=urgent 2=high 3=medium 4=low (default: 3)"},
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "linear_update_issue",
+        "description": "Update a Linear issue state or add a comment.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "issue_id": {"type": "string", "description": "Issue ID (e.g. 'WHO-123')"},
+                "state": {"type": "string", "description": "New state name (e.g. 'Done', 'In Progress')"},
+                "comment": {"type": "string", "description": "Comment to add"},
+            },
+            "required": ["issue_id"],
         },
     },
 ]
@@ -898,6 +1180,64 @@ def handle_tools_call(req_id, params: dict) -> dict:
 
     if name == "ollama_agent":
         return handle_ollama_agent(req_id, arguments)
+
+    # ── 檔案系統
+    if name == "fs_list":
+        return handle_fs_list(req_id, arguments)
+    if name == "fs_read":
+        return handle_fs_read(req_id, arguments)
+    if name == "fs_write":
+        return handle_fs_write(req_id, arguments)
+    if name == "fs_move":
+        return handle_fs_move(req_id, arguments)
+    if name == "fs_delete":
+        return handle_fs_delete(req_id, arguments)
+    if name == "fs_search":
+        return handle_fs_search(req_id, arguments)
+    if name == "fs_disk_info":
+        return handle_fs_disk_info(req_id, arguments)
+
+    # ── 系統
+    if name == "sys_run":
+        return handle_sys_run(req_id, arguments)
+    if name == "sys_info":
+        return handle_sys_info(req_id, arguments)
+    if name == "sys_processes":
+        return handle_sys_processes(req_id, arguments)
+
+    # ── Git
+    if name == "git_status":
+        return handle_git_status(req_id, arguments)
+    if name == "git_log":
+        return handle_git_log(req_id, arguments)
+    if name == "git_diff":
+        return handle_git_diff(req_id, arguments)
+    if name == "git_commit":
+        return handle_git_commit(req_id, arguments)
+
+    # ── Playwright
+    if name == "browser_screenshot":
+        return handle_browser_screenshot(req_id, arguments)
+    if name == "browser_get_text":
+        return handle_browser_get_text(req_id, arguments)
+    if name == "browser_run_script":
+        return handle_browser_run_script(req_id, arguments)
+
+    # ── 免費圖片生成
+    if name == "image_generate_free":
+        return handle_image_generate_free(req_id, arguments)
+
+    # ── Web Search
+    if name == "web_search":
+        return handle_web_search(req_id, arguments)
+
+    # ── Linear
+    if name == "linear_issues":
+        return handle_linear_issues(req_id, arguments)
+    if name == "linear_create_issue":
+        return handle_linear_create_issue(req_id, arguments)
+    if name == "linear_update_issue":
+        return handle_linear_update_issue(req_id, arguments)
 
     return make_response(req_id, make_tool_text_response(f"Unknown tool: {name}", is_error=True))
 
@@ -1422,6 +1762,664 @@ def handle_ollama_agent(req_id, arguments: dict) -> dict:
     task, working_dir = sync_args
     output, is_error = run_ollama_task(task, arguments.get("model", "qwen3.5:latest"), working_dir)
     return make_response(req_id, make_tool_text_response(output, is_error=is_error))
+
+
+# ─── File System Handlers ────────────────────────────────────────────────────
+
+MCP_TRASH_DIR = Path(r"C:\Users\EdgarsTool\.mcp-trash")
+
+
+def handle_fs_list(req_id, arguments: dict) -> dict:
+    path = arguments.get("path", "").strip()
+    show_hidden = arguments.get("show_hidden", False)
+    if not path:
+        return make_response(req_id, make_tool_text_response("Error: path is required", is_error=True))
+    try:
+        p = Path(path)
+        if not p.exists():
+            return make_response(req_id, make_tool_text_response(f"Error: path does not exist: {path}", is_error=True))
+        if not p.is_dir():
+            return make_response(req_id, make_tool_text_response(f"Error: not a directory: {path}", is_error=True))
+        entries = []
+        for item in sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name.lower())):
+            if not show_hidden and item.name.startswith("."):
+                continue
+            try:
+                stat = item.stat()
+                mtime = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+                kind = "DIR " if item.is_dir() else "FILE"
+                size_str = f"{stat.st_size:>12,}" if item.is_file() else "           —"
+                entries.append(f"{kind}  {mtime}  {size_str}  {item.name}")
+            except (PermissionError, OSError):
+                entries.append(f"???   (permission denied)              {item.name}")
+        header = f"Directory: {path}\n{len(entries)} item(s)\n" + "─" * 65
+        body = "\n".join(entries) if entries else "(empty)"
+        return make_response(req_id, make_tool_text_response(f"{header}\n{body}"))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_fs_read(req_id, arguments: dict) -> dict:
+    path = arguments.get("path", "").strip()
+    max_lines = int(arguments.get("max_lines", 200))
+    if not path:
+        return make_response(req_id, make_tool_text_response("Error: path is required", is_error=True))
+    try:
+        p = Path(path)
+        if not p.exists():
+            return make_response(req_id, make_tool_text_response(f"Error: file not found: {path}", is_error=True))
+        if not p.is_file():
+            return make_response(req_id, make_tool_text_response(f"Error: not a file: {path}", is_error=True))
+        size = p.stat().st_size
+        if size > 5 * 1024 * 1024:
+            return make_response(req_id, make_tool_text_response(
+                f"Error: file too large ({size:,} bytes). Max 5MB.", is_error=True
+            ))
+        content = p.read_text(encoding="utf-8", errors="replace")
+        lines = content.splitlines()
+        total = len(lines)
+        if total > max_lines:
+            body = "\n".join(lines[:max_lines]) + f"\n... (showing {max_lines}/{total} lines)"
+        else:
+            body = content
+        return make_response(req_id, make_tool_text_response(
+            f"File: {path} ({size:,} bytes, {total} lines)\n---\n{body}"
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_fs_write(req_id, arguments: dict) -> dict:
+    path = arguments.get("path", "").strip()
+    content = arguments.get("content", "")
+    append = arguments.get("append", False)
+    if not path:
+        return make_response(req_id, make_tool_text_response("Error: path is required", is_error=True))
+    try:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        mode = "a" if append else "w"
+        with open(p, mode, encoding="utf-8") as f:
+            f.write(content)
+        action = "Appended to" if append else "Written"
+        size = p.stat().st_size
+        return make_response(req_id, make_tool_text_response(f"{action}: {path} ({size:,} bytes)"))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_fs_move(req_id, arguments: dict) -> dict:
+    src = arguments.get("src", "").strip()
+    dst = arguments.get("dst", "").strip()
+    if not src or not dst:
+        return make_response(req_id, make_tool_text_response("Error: src and dst are required", is_error=True))
+    try:
+        src_p = Path(src)
+        dst_p = Path(dst)
+        if not src_p.exists():
+            return make_response(req_id, make_tool_text_response(f"Error: source not found: {src}", is_error=True))
+        dst_p.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src_p), str(dst_p))
+        return make_response(req_id, make_tool_text_response(f"Moved: {src} → {dst}"))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_fs_delete(req_id, arguments: dict) -> dict:
+    path = arguments.get("path", "").strip()
+    if not path:
+        return make_response(req_id, make_tool_text_response("Error: path is required", is_error=True))
+    try:
+        p = Path(path)
+        if not p.exists():
+            return make_response(req_id, make_tool_text_response(f"Error: not found: {path}", is_error=True))
+        MCP_TRASH_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        trash_dest = MCP_TRASH_DIR / f"{ts}_{p.name}"
+        shutil.move(str(p), str(trash_dest))
+        return make_response(req_id, make_tool_text_response(
+            f"Moved to trash: {path}\nTrash location: {trash_dest}\nTo restore: move it back manually."
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_fs_search(req_id, arguments: dict) -> dict:
+    directory = arguments.get("directory", "").strip()
+    pattern = arguments.get("pattern", "*").strip()
+    search_content = arguments.get("search_content", "")
+    max_results = int(arguments.get("max_results", 50))
+    if not directory:
+        return make_response(req_id, make_tool_text_response("Error: directory is required", is_error=True))
+    try:
+        d = Path(directory)
+        if not d.exists():
+            return make_response(req_id, make_tool_text_response(f"Error: directory not found: {directory}", is_error=True))
+        matches = []
+        for root, dirs, files in os.walk(str(d)):
+            dirs[:] = [dd for dd in dirs if not dd.startswith(".")]
+            for fname in files:
+                if fnmatch.fnmatch(fname.lower(), pattern.lower()):
+                    fpath = Path(root) / fname
+                    if search_content:
+                        try:
+                            text = fpath.read_text(encoding="utf-8", errors="replace")
+                            if search_content.lower() in text.lower():
+                                matches.append(str(fpath))
+                        except (PermissionError, OSError):
+                            pass
+                    else:
+                        matches.append(str(fpath))
+                if len(matches) >= max_results:
+                    break
+            if len(matches) >= max_results:
+                break
+        if not matches:
+            note = f" containing '{search_content}'" if search_content else ""
+            return make_response(req_id, make_tool_text_response(
+                f"No files matching '{pattern}'{note} found in {directory}"
+            ))
+        result = f"Found {len(matches)} file(s) (limit {max_results}):\n" + "\n".join(matches)
+        return make_response(req_id, make_tool_text_response(result))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_fs_disk_info(req_id, arguments: dict) -> dict:
+    try:
+        lines = ["Disk Usage", "─" * 55]
+        for letter in string.ascii_uppercase:
+            drive = f"{letter}:\\"
+            if os.path.exists(drive):
+                try:
+                    usage = shutil.disk_usage(drive)
+                    total_gb = usage.total / (1024 ** 3)
+                    used_gb = usage.used / (1024 ** 3)
+                    free_gb = usage.free / (1024 ** 3)
+                    pct = usage.used / usage.total * 100 if usage.total > 0 else 0
+                    bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
+                    lines.append(
+                        f"{drive}  [{bar}] {pct:4.0f}%  "
+                        f"{used_gb:.1f}/{total_gb:.1f} GB  free: {free_gb:.1f} GB"
+                    )
+                except (PermissionError, OSError):
+                    lines.append(f"{drive}  (inaccessible)")
+        return make_response(req_id, make_tool_text_response("\n".join(lines)))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+# ─── System Handlers ─────────────────────────────────────────────────────────
+
+_BLOCKED_PATTERNS = [
+    "format ", "format.com", "diskpart", "del /f /s /q c:\\",
+    "rmdir /s /q c:\\", "rd /s /q c:\\", "rm -rf /", "dd if=",
+    "reg delete hklm", "bcdedit", "shutdown /r /o",
+]
+
+
+def handle_sys_run(req_id, arguments: dict) -> dict:
+    command = arguments.get("command", "").strip()
+    working_dir = arguments.get("working_dir", str(Path.home())).strip()
+    timeout = min(int(arguments.get("timeout", 30)), 120)
+    if not command:
+        return make_response(req_id, make_tool_text_response("Error: command is required", is_error=True))
+    cmd_lower = command.lower()
+    for blocked in _BLOCKED_PATTERNS:
+        if blocked in cmd_lower:
+            return make_response(req_id, make_tool_text_response(
+                f"Error: blocked command pattern: '{blocked}'", is_error=True
+            ))
+    try:
+        cwd = working_dir if os.path.exists(working_dir) else str(Path.home())
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True, text=True, timeout=timeout, cwd=cwd, shell=False,
+        )
+        parts = [f"Exit code: {result.returncode}"]
+        if result.stdout.strip():
+            parts.append(f"STDOUT:\n{result.stdout.strip()}")
+        if result.stderr.strip():
+            parts.append(f"STDERR:\n{result.stderr.strip()}")
+        return make_response(req_id, make_tool_text_response(
+            "\n\n".join(parts), is_error=(result.returncode != 0)
+        ))
+    except subprocess.TimeoutExpired:
+        return make_response(req_id, make_tool_text_response(
+            f"Error: timed out after {timeout}s", is_error=True
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_sys_info(req_id, arguments: dict) -> dict:
+    try:
+        lines = [f"OS: {platform.platform()}", f"Python: {sys.version.split()[0]}"]
+        cpu_r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "Get-CimInstance Win32_Processor | Select-Object -First 1 | "
+             "ForEach-Object { \"CPU: $($_.Name) | Cores: $($_.NumberOfCores) | Logical: $($_.NumberOfLogicalProcessors)\" }"],
+            capture_output=True, text=True, timeout=10, shell=False,
+        )
+        if cpu_r.stdout.strip():
+            lines.append(cpu_r.stdout.strip())
+        ram_r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "$os = Get-CimInstance Win32_OperatingSystem; "
+             "$total = [math]::Round($os.TotalVisibleMemorySize/1MB,1); "
+             "$free = [math]::Round($os.FreePhysicalMemory/1MB,1); "
+             "$used = [math]::Round($total - $free,1); "
+             "\"RAM: ${used}GB used / ${total}GB total (${free}GB free)\""],
+            capture_output=True, text=True, timeout=10, shell=False,
+        )
+        if ram_r.stdout.strip():
+            lines.append(ram_r.stdout.strip())
+        return make_response(req_id, make_tool_text_response("\n".join(lines)))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_sys_processes(req_id, arguments: dict) -> dict:
+    limit = int(arguments.get("limit", 20))
+    sort_by = arguments.get("sort_by", "memory")
+    sort_prop = {"memory": "WorkingSet", "cpu": "CPU", "name": "Name"}.get(sort_by, "WorkingSet")
+    sort_dir = "Ascending" if sort_by == "name" else "Descending"
+    try:
+        ps_cmd = (
+            f"Get-Process | Sort-Object {sort_prop} -{sort_dir} | Select-Object -First {limit} | "
+            "Format-Table Name, Id, @{N='Mem(MB)';E={[math]::Round($_.WorkingSet/1MB,1)}}, CPU -AutoSize | "
+            "Out-String -Width 100"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=20, shell=False,
+        )
+        return make_response(req_id, make_tool_text_response(
+            f"Top {limit} processes (sorted by {sort_by}):\n{result.stdout.strip()}"
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+# ─── Git Handlers ─────────────────────────────────────────────────────────────
+
+def _git(args: list[str], cwd: str, timeout: int = 15) -> tuple[str, bool]:
+    try:
+        result = subprocess.run(
+            ["git"] + args,
+            capture_output=True, text=True, timeout=timeout, cwd=cwd, shell=False,
+        )
+        out = (result.stdout + result.stderr).strip()
+        return out, result.returncode != 0
+    except subprocess.TimeoutExpired:
+        return f"git timed out after {timeout}s", True
+    except Exception as e:
+        return str(e), True
+
+
+def handle_git_status(req_id, arguments: dict) -> dict:
+    repo = arguments.get("repo_path", "").strip() or CODEX_DEFAULT_WORKDIR
+    out, err = _git(["status"], repo)
+    return make_response(req_id, make_tool_text_response(out, is_error=err))
+
+
+def handle_git_log(req_id, arguments: dict) -> dict:
+    repo = arguments.get("repo_path", "").strip() or CODEX_DEFAULT_WORKDIR
+    limit = int(arguments.get("limit", 10))
+    out, err = _git(["log", f"--max-count={limit}", "--oneline", "--decorate"], repo)
+    return make_response(req_id, make_tool_text_response(out, is_error=err))
+
+
+def handle_git_diff(req_id, arguments: dict) -> dict:
+    repo = arguments.get("repo_path", "").strip() or CODEX_DEFAULT_WORKDIR
+    staged = arguments.get("staged", False)
+    args = ["diff", "--stat"] + (["--cached"] if staged else [])
+    out, err = _git(args, repo)
+    if not out.strip():
+        out = "(no diff — working tree is clean)"
+    return make_response(req_id, make_tool_text_response(out, is_error=err))
+
+
+def handle_git_commit(req_id, arguments: dict) -> dict:
+    repo = arguments.get("repo_path", "").strip() or CODEX_DEFAULT_WORKDIR
+    message = arguments.get("message", "").strip()
+    files = arguments.get("files", [])
+    if not message:
+        return make_response(req_id, make_tool_text_response("Error: message is required", is_error=True))
+    add_out, add_err = _git(["add"] + files, repo) if files else _git(["add", "-A"], repo)
+    if add_err and "nothing to commit" not in add_out:
+        return make_response(req_id, make_tool_text_response(f"Stage failed:\n{add_out}", is_error=True))
+    commit_out, commit_err = _git(["commit", "-m", message], repo)
+    return make_response(req_id, make_tool_text_response(
+        f"Stage:\n{add_out}\n\nCommit:\n{commit_out}", is_error=commit_err
+    ))
+
+
+# ─── Free Image Generation (Pollinations.AI) ─────────────────────────────────
+
+def handle_image_generate_free(req_id, arguments: dict) -> dict:
+    prompt = arguments.get("prompt", "").strip()
+    if not prompt:
+        return make_response(req_id, make_tool_text_response("Error: prompt is required", is_error=True))
+    width  = int(arguments.get("width",  1024))
+    height = int(arguments.get("height", 1024))
+    model  = arguments.get("model", "flux").strip() or "flux"
+    seed   = arguments.get("seed")
+
+    try:
+        encoded = urllib.parse.quote(prompt)
+        url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&model={model}&nologo=true"
+        if seed is not None:
+            url += f"&seed={seed}"
+
+        log(f"image_generate_free: fetching {url}")
+        req = urllib.request.Request(url, headers={"User-Agent": "handcraft-mcp/1.0"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            img_bytes = resp.read()
+
+        SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = SCREENSHOTS_DIR / f"pollinations_{ts}.png"
+        fname.write_bytes(img_bytes)
+
+        return make_response(req_id, make_tool_text_response(
+            f"Image saved: {fname}\n"
+            f"Prompt: {prompt}\n"
+            f"Model: {model}  Size: {width}x{height}  ({len(img_bytes):,} bytes)\n"
+            f"Source: Pollinations.AI (free, no key)"
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+# ─── Playwright Handlers ─────────────────────────────────────────────────────
+
+def _pw_launch():
+    """Import playwright sync API lazily."""
+    from playwright.sync_api import sync_playwright  # noqa: PLC0415
+    return sync_playwright
+
+
+def handle_browser_screenshot(req_id, arguments: dict) -> dict:
+    url = arguments.get("url", "").strip()
+    wait_ms = int(arguments.get("wait_ms", 2000))
+    full_page = bool(arguments.get("full_page", False))
+    if not url:
+        return make_response(req_id, make_tool_text_response("Error: url is required", is_error=True))
+    try:
+        SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = SCREENSHOTS_DIR / f"screenshot_{ts}.png"
+        sync_playwright = _pw_launch()
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, timeout=30000)
+            page.wait_for_load_state("networkidle", timeout=15000)
+            if wait_ms:
+                page.wait_for_timeout(wait_ms)
+            page.screenshot(path=str(fname), full_page=full_page)
+            title = page.title()
+            browser.close()
+        return make_response(req_id, make_tool_text_response(
+            f"Screenshot saved: {fname}\nPage title: {title}\nURL: {url}"
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_browser_get_text(req_id, arguments: dict) -> dict:
+    url = arguments.get("url", "").strip()
+    selector = arguments.get("selector", "body").strip() or "body"
+    wait_ms = int(arguments.get("wait_ms", 1000))
+    if not url:
+        return make_response(req_id, make_tool_text_response("Error: url is required", is_error=True))
+    try:
+        sync_playwright = _pw_launch()
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, timeout=30000)
+            page.wait_for_load_state("networkidle", timeout=15000)
+            if wait_ms:
+                page.wait_for_timeout(wait_ms)
+            try:
+                text = page.locator(selector).first.inner_text(timeout=5000)
+            except Exception:
+                text = page.evaluate("document.body.innerText")
+            title = page.title()
+            browser.close()
+        text = text.strip()
+        if len(text) > 8000:
+            text = text[:8000] + f"\n... (truncated, original length: {len(text)} chars)"
+        return make_response(req_id, make_tool_text_response(
+            f"URL: {url}\nTitle: {title}\nSelector: {selector}\n---\n{text}"
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_browser_run_script(req_id, arguments: dict) -> dict:
+    url = arguments.get("url", "").strip()
+    script = arguments.get("script", "").strip()
+    wait_ms = int(arguments.get("wait_ms", 1000))
+    if not url or not script:
+        return make_response(req_id, make_tool_text_response("Error: url and script are required", is_error=True))
+    try:
+        sync_playwright = _pw_launch()
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, timeout=30000)
+            page.wait_for_load_state("networkidle", timeout=15000)
+            if wait_ms:
+                page.wait_for_timeout(wait_ms)
+            result = page.evaluate(script)
+            browser.close()
+        result_str = json.dumps(result, ensure_ascii=False, indent=2) if result is not None else "null"
+        if len(result_str) > 5000:
+            result_str = result_str[:5000] + "\n... (truncated)"
+        return make_response(req_id, make_tool_text_response(
+            f"URL: {url}\nScript result:\n{result_str}"
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+# ─── Web Search Handler ───────────────────────────────────────────────────────
+
+def handle_web_search(req_id, arguments: dict) -> dict:
+    query = arguments.get("query", "").strip()
+    if not query:
+        return make_response(req_id, make_tool_text_response("Error: query is required", is_error=True))
+    if not PERPLEXITY_API_KEY:
+        return make_response(req_id, make_tool_text_response(
+            "Error: PERPLEXITY_API_KEY not set. Add to Doppler: handcraft-mcp / prd", is_error=True
+        ))
+    try:
+        payload = json.dumps({
+            "model": "llama-3.1-sonar-small-128k-online",
+            "messages": [{"role": "user", "content": query}],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.perplexity.ai/chat/completions",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        content = data["choices"][0]["message"]["content"]
+        citations = data.get("citations", [])
+        result = content
+        if citations:
+            result += "\n\nSources:\n" + "\n".join(f"- {c}" for c in citations[:5])
+        return make_response(req_id, make_tool_text_response(result))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+# ─── Linear Handlers ──────────────────────────────────────────────────────────
+
+def _linear_graphql(query: str, variables: dict | None = None) -> dict:
+    if not LINEAR_API_KEY:
+        raise ValueError("LINEAR_API_KEY not set in Doppler")
+    payload = json.dumps({"query": query, "variables": variables or {}}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.linear.app/graphql",
+        data=payload,
+        headers={
+            "Authorization": LINEAR_API_KEY,
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def handle_linear_issues(req_id, arguments: dict) -> dict:
+    state = arguments.get("state", "").strip()
+    limit = int(arguments.get("limit", 10))
+    assignee_me = bool(arguments.get("assignee_me", False))
+    try:
+        filter_parts = []
+        if state:
+            filter_parts.append(f'state: {{ name: {{ eq: "{state}" }} }}')
+        if assignee_me:
+            filter_parts.append('assignee: { isMe: { eq: true } }')
+        filter_clause = f"filter: {{ {', '.join(filter_parts)} }}" if filter_parts else ""
+        gql = f"""
+        query {{
+            issues({filter_clause} first: {limit} orderBy: updatedAt) {{
+                nodes {{
+                    identifier title
+                    state {{ name }}
+                    priority
+                    assignee {{ name }}
+                    updatedAt
+                }}
+            }}
+        }}
+        """
+        data = _linear_graphql(gql)
+        issues = data["data"]["issues"]["nodes"]
+        if not issues:
+            return make_response(req_id, make_tool_text_response("No issues found."))
+        prio_map = {0: "—", 1: "🔴 Urgent", 2: "🟠 High", 3: "🟡 Medium", 4: "🟢 Low"}
+        lines = []
+        for iss in issues:
+            prio = prio_map.get(iss.get("priority", 0), "—")
+            assignee = iss.get("assignee", {}) or {}
+            lines.append(
+                f"[{iss['identifier']}] {iss['title']}\n"
+                f"  State: {iss['state']['name']}  Priority: {prio}  "
+                f"Assignee: {assignee.get('name', '—')}"
+            )
+        return make_response(req_id, make_tool_text_response(
+            f"Linear issues ({len(issues)}):\n\n" + "\n\n".join(lines)
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_linear_create_issue(req_id, arguments: dict) -> dict:
+    title = arguments.get("title", "").strip()
+    description = arguments.get("description", "").strip()
+    team_name = arguments.get("team_name", "").strip()
+    priority = int(arguments.get("priority", 3))
+    if not title:
+        return make_response(req_id, make_tool_text_response("Error: title is required", is_error=True))
+    try:
+        # Get team ID
+        teams_data = _linear_graphql("query { teams { nodes { id name } } }")
+        teams = teams_data["data"]["teams"]["nodes"]
+        if not teams:
+            return make_response(req_id, make_tool_text_response("Error: no teams found", is_error=True))
+        team = next((t for t in teams if team_name.lower() in t["name"].lower()), teams[0])
+        team_id = team["id"]
+
+        mutation = """
+        mutation CreateIssue($teamId: String!, $title: String!, $description: String, $priority: Int) {
+            issueCreate(input: { teamId: $teamId, title: $title, description: $description, priority: $priority }) {
+                issue { identifier title url }
+            }
+        }
+        """
+        result = _linear_graphql(mutation, {
+            "teamId": team_id, "title": title,
+            "description": description or None, "priority": priority,
+        })
+        iss = result["data"]["issueCreate"]["issue"]
+        return make_response(req_id, make_tool_text_response(
+            f"Created: [{iss['identifier']}] {iss['title']}\nURL: {iss['url']}"
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_linear_update_issue(req_id, arguments: dict) -> dict:
+    issue_id = arguments.get("issue_id", "").strip()
+    state_name = arguments.get("state", "").strip()
+    comment = arguments.get("comment", "").strip()
+    if not issue_id:
+        return make_response(req_id, make_tool_text_response("Error: issue_id is required", is_error=True))
+    try:
+        results = []
+        # Resolve issue UUID from identifier
+        find_q = f"""
+        query {{
+            issues(filter: {{ identifier: {{ eq: "{issue_id}" }} }} first: 1) {{
+                nodes {{ id identifier title team {{ states {{ nodes {{ id name }} }} }} }}
+            }}
+        }}
+        """
+        data = _linear_graphql(find_q)
+        nodes = data["data"]["issues"]["nodes"]
+        if not nodes:
+            return make_response(req_id, make_tool_text_response(f"Issue not found: {issue_id}", is_error=True))
+        iss = nodes[0]
+        iss_uuid = iss["id"]
+
+        if state_name:
+            states = iss["team"]["states"]["nodes"]
+            state = next((s for s in states if state_name.lower() in s["name"].lower()), None)
+            if not state:
+                available = ", ".join(s["name"] for s in states)
+                return make_response(req_id, make_tool_text_response(
+                    f"State '{state_name}' not found. Available: {available}", is_error=True
+                ))
+            update_m = """
+            mutation UpdateIssue($id: String!, $stateId: String!) {
+                issueUpdate(id: $id, input: { stateId: $stateId }) {
+                    issue { identifier state { name } }
+                }
+            }
+            """
+            upd = _linear_graphql(update_m, {"id": iss_uuid, "stateId": state["id"]})
+            updated = upd["data"]["issueUpdate"]["issue"]
+            results.append(f"State updated → {updated['state']['name']}")
+
+        if comment:
+            comment_m = """
+            mutation AddComment($issueId: String!, $body: String!) {
+                commentCreate(input: { issueId: $issueId, body: $body }) {
+                    comment { id }
+                }
+            }
+            """
+            _linear_graphql(comment_m, {"issueId": iss_uuid, "body": comment})
+            results.append("Comment added")
+
+        if not results:
+            return make_response(req_id, make_tool_text_response("Nothing to update (provide state or comment)"))
+
+        return make_response(req_id, make_tool_text_response(
+            f"[{issue_id}] {iss['title']}\n" + "\n".join(results)
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
 
 
 if __name__ == "__main__":
