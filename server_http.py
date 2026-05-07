@@ -41,8 +41,13 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 # ── Secrets（由 Doppler 注入）─────────────────────────────────────────────────
-NOTION_API_KEY = os.getenv("NOTION_API_KEY", "")
-API_TOKEN = os.getenv("MCP_API_TOKEN", "")
+NOTION_API_KEY      = os.getenv("NOTION_API_KEY", "")
+API_TOKEN           = os.getenv("MCP_API_TOKEN", "")
+PERPLEXITY_API_KEY  = os.getenv("PERPLEXITY_API_KEY", "")
+OPENAI_API_KEY      = os.getenv("OPENAI_API_KEY", "")
+LINEAR_API_KEY      = os.getenv("LINEAR_API_KEY", "")
+
+SCREENSHOTS_DIR = Path(r"C:\Users\EdgarsTool\Projects\mcp-handcraft\.screenshots")
 
 CODEX_CMD = r"C:\Users\EdgarsTool\AppData\Roaming\npm\codex.cmd"
 CLAUDE_CMD = shutil.which("claude") or "claude"
@@ -606,6 +611,98 @@ TOOLS = [
             "required": ["message"],
         },
     },
+    # ── Playwright 瀏覽器工具 ─────────────────────────────────────────────────
+    {
+        "name": "browser_screenshot",
+        "description": "Open a URL in headless Chromium, wait for load, save a screenshot PNG, and return the file path.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to open"},
+                "wait_ms": {"type": "integer", "description": "Extra wait after load in ms (default: 2000)"},
+                "full_page": {"type": "boolean", "description": "Capture full page scroll height (default: false)"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "browser_get_text",
+        "description": "Fetch a URL in headless Chromium and return the visible text content of the page (or a CSS selector).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to open"},
+                "selector": {"type": "string", "description": "CSS selector to extract text from (default: body)"},
+                "wait_ms": {"type": "integer", "description": "Extra wait after load in ms (default: 1000)"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "browser_run_script",
+        "description": "Navigate to a URL and run JavaScript, returning the result. Useful for scraping or checking page state.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to open"},
+                "script": {"type": "string", "description": "JavaScript to evaluate (return value is serialized to JSON)"},
+                "wait_ms": {"type": "integer", "description": "Extra wait after load (default: 1000)"},
+            },
+            "required": ["url", "script"],
+        },
+    },
+    # ── Web Search ────────────────────────────────────────────────────────────
+    {
+        "name": "web_search",
+        "description": "Search the web using Perplexity AI and return a summarized answer with sources.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+            },
+            "required": ["query"],
+        },
+    },
+    # ── Linear 工具 ───────────────────────────────────────────────────────────
+    {
+        "name": "linear_issues",
+        "description": "List Linear issues. Filter by state name (e.g. 'In Progress', 'Todo', 'Done').",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "state": {"type": "string", "description": "Filter by state name (optional)"},
+                "limit": {"type": "integer", "description": "Number of issues (default: 10)"},
+                "assignee_me": {"type": "boolean", "description": "Only show issues assigned to me (default: false)"},
+            },
+        },
+    },
+    {
+        "name": "linear_create_issue",
+        "description": "Create a new Linear issue.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Issue title"},
+                "description": {"type": "string", "description": "Issue description (markdown)"},
+                "team_name": {"type": "string", "description": "Team name (default: first team found)"},
+                "priority": {"type": "integer", "description": "Priority 0=none 1=urgent 2=high 3=medium 4=low (default: 3)"},
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "linear_update_issue",
+        "description": "Update a Linear issue state or add a comment.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "issue_id": {"type": "string", "description": "Issue ID (e.g. 'WHO-123')"},
+                "state": {"type": "string", "description": "New state name (e.g. 'Done', 'In Progress')"},
+                "comment": {"type": "string", "description": "Comment to add"},
+            },
+            "required": ["issue_id"],
+        },
+    },
 ]
 
 # ── Origin 白名單（防 DNS rebinding，spec 強制要求）────────────────────────────
@@ -1097,6 +1194,26 @@ def handle_tools_call(req_id, params: dict) -> dict:
         return handle_git_diff(req_id, arguments)
     if name == "git_commit":
         return handle_git_commit(req_id, arguments)
+
+    # ── Playwright
+    if name == "browser_screenshot":
+        return handle_browser_screenshot(req_id, arguments)
+    if name == "browser_get_text":
+        return handle_browser_get_text(req_id, arguments)
+    if name == "browser_run_script":
+        return handle_browser_run_script(req_id, arguments)
+
+    # ── Web Search
+    if name == "web_search":
+        return handle_web_search(req_id, arguments)
+
+    # ── Linear
+    if name == "linear_issues":
+        return handle_linear_issues(req_id, arguments)
+    if name == "linear_create_issue":
+        return handle_linear_create_issue(req_id, arguments)
+    if name == "linear_update_issue":
+        return handle_linear_update_issue(req_id, arguments)
 
     return make_response(req_id, make_tool_text_response(f"Unknown tool: {name}", is_error=True))
 
@@ -1952,6 +2069,296 @@ def handle_git_commit(req_id, arguments: dict) -> dict:
     return make_response(req_id, make_tool_text_response(
         f"Stage:\n{add_out}\n\nCommit:\n{commit_out}", is_error=commit_err
     ))
+
+
+# ─── Playwright Handlers ─────────────────────────────────────────────────────
+
+def _pw_launch():
+    """Import playwright sync API lazily."""
+    from playwright.sync_api import sync_playwright  # noqa: PLC0415
+    return sync_playwright
+
+
+def handle_browser_screenshot(req_id, arguments: dict) -> dict:
+    url = arguments.get("url", "").strip()
+    wait_ms = int(arguments.get("wait_ms", 2000))
+    full_page = bool(arguments.get("full_page", False))
+    if not url:
+        return make_response(req_id, make_tool_text_response("Error: url is required", is_error=True))
+    try:
+        SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = SCREENSHOTS_DIR / f"screenshot_{ts}.png"
+        sync_playwright = _pw_launch()
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, timeout=30000)
+            page.wait_for_load_state("networkidle", timeout=15000)
+            if wait_ms:
+                page.wait_for_timeout(wait_ms)
+            page.screenshot(path=str(fname), full_page=full_page)
+            title = page.title()
+            browser.close()
+        return make_response(req_id, make_tool_text_response(
+            f"Screenshot saved: {fname}\nPage title: {title}\nURL: {url}"
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_browser_get_text(req_id, arguments: dict) -> dict:
+    url = arguments.get("url", "").strip()
+    selector = arguments.get("selector", "body").strip() or "body"
+    wait_ms = int(arguments.get("wait_ms", 1000))
+    if not url:
+        return make_response(req_id, make_tool_text_response("Error: url is required", is_error=True))
+    try:
+        sync_playwright = _pw_launch()
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, timeout=30000)
+            page.wait_for_load_state("networkidle", timeout=15000)
+            if wait_ms:
+                page.wait_for_timeout(wait_ms)
+            try:
+                text = page.locator(selector).first.inner_text(timeout=5000)
+            except Exception:
+                text = page.evaluate("document.body.innerText")
+            title = page.title()
+            browser.close()
+        text = text.strip()
+        if len(text) > 8000:
+            text = text[:8000] + f"\n... (truncated, original length: {len(text)} chars)"
+        return make_response(req_id, make_tool_text_response(
+            f"URL: {url}\nTitle: {title}\nSelector: {selector}\n---\n{text}"
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_browser_run_script(req_id, arguments: dict) -> dict:
+    url = arguments.get("url", "").strip()
+    script = arguments.get("script", "").strip()
+    wait_ms = int(arguments.get("wait_ms", 1000))
+    if not url or not script:
+        return make_response(req_id, make_tool_text_response("Error: url and script are required", is_error=True))
+    try:
+        sync_playwright = _pw_launch()
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, timeout=30000)
+            page.wait_for_load_state("networkidle", timeout=15000)
+            if wait_ms:
+                page.wait_for_timeout(wait_ms)
+            result = page.evaluate(script)
+            browser.close()
+        result_str = json.dumps(result, ensure_ascii=False, indent=2) if result is not None else "null"
+        if len(result_str) > 5000:
+            result_str = result_str[:5000] + "\n... (truncated)"
+        return make_response(req_id, make_tool_text_response(
+            f"URL: {url}\nScript result:\n{result_str}"
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+# ─── Web Search Handler ───────────────────────────────────────────────────────
+
+def handle_web_search(req_id, arguments: dict) -> dict:
+    query = arguments.get("query", "").strip()
+    if not query:
+        return make_response(req_id, make_tool_text_response("Error: query is required", is_error=True))
+    if not PERPLEXITY_API_KEY:
+        return make_response(req_id, make_tool_text_response(
+            "Error: PERPLEXITY_API_KEY not set. Add to Doppler: handcraft-mcp / prd", is_error=True
+        ))
+    try:
+        payload = json.dumps({
+            "model": "llama-3.1-sonar-small-128k-online",
+            "messages": [{"role": "user", "content": query}],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.perplexity.ai/chat/completions",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        content = data["choices"][0]["message"]["content"]
+        citations = data.get("citations", [])
+        result = content
+        if citations:
+            result += "\n\nSources:\n" + "\n".join(f"- {c}" for c in citations[:5])
+        return make_response(req_id, make_tool_text_response(result))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+# ─── Linear Handlers ──────────────────────────────────────────────────────────
+
+def _linear_graphql(query: str, variables: dict | None = None) -> dict:
+    if not LINEAR_API_KEY:
+        raise ValueError("LINEAR_API_KEY not set in Doppler")
+    payload = json.dumps({"query": query, "variables": variables or {}}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.linear.app/graphql",
+        data=payload,
+        headers={
+            "Authorization": LINEAR_API_KEY,
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def handle_linear_issues(req_id, arguments: dict) -> dict:
+    state = arguments.get("state", "").strip()
+    limit = int(arguments.get("limit", 10))
+    assignee_me = bool(arguments.get("assignee_me", False))
+    try:
+        filter_parts = []
+        if state:
+            filter_parts.append(f'state: {{ name: {{ eq: "{state}" }} }}')
+        if assignee_me:
+            filter_parts.append('assignee: { isMe: { eq: true } }')
+        filter_clause = f"filter: {{ {', '.join(filter_parts)} }}" if filter_parts else ""
+        gql = f"""
+        query {{
+            issues({filter_clause} first: {limit} orderBy: updatedAt) {{
+                nodes {{
+                    identifier title
+                    state {{ name }}
+                    priority
+                    assignee {{ name }}
+                    updatedAt
+                }}
+            }}
+        }}
+        """
+        data = _linear_graphql(gql)
+        issues = data["data"]["issues"]["nodes"]
+        if not issues:
+            return make_response(req_id, make_tool_text_response("No issues found."))
+        prio_map = {0: "—", 1: "🔴 Urgent", 2: "🟠 High", 3: "🟡 Medium", 4: "🟢 Low"}
+        lines = []
+        for iss in issues:
+            prio = prio_map.get(iss.get("priority", 0), "—")
+            assignee = iss.get("assignee", {}) or {}
+            lines.append(
+                f"[{iss['identifier']}] {iss['title']}\n"
+                f"  State: {iss['state']['name']}  Priority: {prio}  "
+                f"Assignee: {assignee.get('name', '—')}"
+            )
+        return make_response(req_id, make_tool_text_response(
+            f"Linear issues ({len(issues)}):\n\n" + "\n\n".join(lines)
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_linear_create_issue(req_id, arguments: dict) -> dict:
+    title = arguments.get("title", "").strip()
+    description = arguments.get("description", "").strip()
+    team_name = arguments.get("team_name", "").strip()
+    priority = int(arguments.get("priority", 3))
+    if not title:
+        return make_response(req_id, make_tool_text_response("Error: title is required", is_error=True))
+    try:
+        # Get team ID
+        teams_data = _linear_graphql("query { teams { nodes { id name } } }")
+        teams = teams_data["data"]["teams"]["nodes"]
+        if not teams:
+            return make_response(req_id, make_tool_text_response("Error: no teams found", is_error=True))
+        team = next((t for t in teams if team_name.lower() in t["name"].lower()), teams[0])
+        team_id = team["id"]
+
+        mutation = """
+        mutation CreateIssue($teamId: String!, $title: String!, $description: String, $priority: Int) {
+            issueCreate(input: { teamId: $teamId, title: $title, description: $description, priority: $priority }) {
+                issue { identifier title url }
+            }
+        }
+        """
+        result = _linear_graphql(mutation, {
+            "teamId": team_id, "title": title,
+            "description": description or None, "priority": priority,
+        })
+        iss = result["data"]["issueCreate"]["issue"]
+        return make_response(req_id, make_tool_text_response(
+            f"Created: [{iss['identifier']}] {iss['title']}\nURL: {iss['url']}"
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
+
+
+def handle_linear_update_issue(req_id, arguments: dict) -> dict:
+    issue_id = arguments.get("issue_id", "").strip()
+    state_name = arguments.get("state", "").strip()
+    comment = arguments.get("comment", "").strip()
+    if not issue_id:
+        return make_response(req_id, make_tool_text_response("Error: issue_id is required", is_error=True))
+    try:
+        results = []
+        # Resolve issue UUID from identifier
+        find_q = f"""
+        query {{
+            issues(filter: {{ identifier: {{ eq: "{issue_id}" }} }} first: 1) {{
+                nodes {{ id identifier title team {{ states {{ nodes {{ id name }} }} }} }}
+            }}
+        }}
+        """
+        data = _linear_graphql(find_q)
+        nodes = data["data"]["issues"]["nodes"]
+        if not nodes:
+            return make_response(req_id, make_tool_text_response(f"Issue not found: {issue_id}", is_error=True))
+        iss = nodes[0]
+        iss_uuid = iss["id"]
+
+        if state_name:
+            states = iss["team"]["states"]["nodes"]
+            state = next((s for s in states if state_name.lower() in s["name"].lower()), None)
+            if not state:
+                available = ", ".join(s["name"] for s in states)
+                return make_response(req_id, make_tool_text_response(
+                    f"State '{state_name}' not found. Available: {available}", is_error=True
+                ))
+            update_m = """
+            mutation UpdateIssue($id: String!, $stateId: String!) {
+                issueUpdate(id: $id, input: { stateId: $stateId }) {
+                    issue { identifier state { name } }
+                }
+            }
+            """
+            upd = _linear_graphql(update_m, {"id": iss_uuid, "stateId": state["id"]})
+            updated = upd["data"]["issueUpdate"]["issue"]
+            results.append(f"State updated → {updated['state']['name']}")
+
+        if comment:
+            comment_m = """
+            mutation AddComment($issueId: String!, $body: String!) {
+                commentCreate(input: { issueId: $issueId, body: $body }) {
+                    comment { id }
+                }
+            }
+            """
+            _linear_graphql(comment_m, {"issueId": iss_uuid, "body": comment})
+            results.append("Comment added")
+
+        if not results:
+            return make_response(req_id, make_tool_text_response("Nothing to update (provide state or comment)"))
+
+        return make_response(req_id, make_tool_text_response(
+            f"[{issue_id}] {iss['title']}\n" + "\n".join(results)
+        ))
+    except Exception as e:
+        return make_response(req_id, make_tool_text_response(f"Error: {e}", is_error=True))
 
 
 if __name__ == "__main__":
