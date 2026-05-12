@@ -17,6 +17,7 @@ from server_http import (
     handle_tools_list,
     list_jobs,
     update_job,
+    validate_mcp_api_token,
 )
 
 
@@ -79,6 +80,17 @@ class ServerHttpJobApiTests(unittest.TestCase):
         response = handle_agent_job_cleanup(req_id=1, arguments={})
         text = response["result"]["content"][0]["text"]
         self.assertIn("Expired jobs removed: 1", text)
+
+
+class HttpStartupConfigTests(unittest.TestCase):
+    def test_mcp_api_token_requires_present_value(self):
+        for raw_token in (None, "", "   ", "\t\r\n"):
+            with self.subTest(raw_token=raw_token):
+                with self.assertRaisesRegex(RuntimeError, "MCP_API_TOKEN must be set"):
+                    validate_mcp_api_token(raw_token)
+
+    def test_mcp_api_token_trims_configured_value(self):
+        self.assertEqual("secret-token", validate_mcp_api_token("  secret-token  "))
 
 
 class ClaudeCodeAgentSmokeTests(unittest.TestCase):

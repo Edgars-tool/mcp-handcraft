@@ -42,8 +42,12 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 # ── Secrets（由 Doppler 注入）─────────────────────────────────────────────────
+def load_mcp_api_token() -> str:
+    return os.getenv("MCP_API_TOKEN", "").strip()
+
+
 NOTION_API_KEY      = os.getenv("NOTION_API_KEY", "")
-API_TOKEN           = os.getenv("MCP_API_TOKEN", "")
+API_TOKEN           = load_mcp_api_token()
 PERPLEXITY_API_KEY  = os.getenv("PERPLEXITY_API_KEY", "")
 OPENAI_API_KEY      = os.getenv("OPENAI_API_KEY", "")
 LINEAR_API_KEY      = os.getenv("LINEAR_API_KEY", "")
@@ -1889,7 +1893,25 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
 
 # ─── 主程式 ───────────────────────────────────────────────────────────────────
 
+def validate_mcp_api_token(raw_token: str | None) -> str:
+    api_token = (raw_token or "").strip()
+    if not api_token:
+        raise RuntimeError("MCP_API_TOKEN must be set to a non-empty value before starting the HTTP server")
+    return api_token
+
+
+def validate_http_startup_config() -> str:
+    return validate_mcp_api_token(load_mcp_api_token())
+
+
 def main() -> None:
+    global API_TOKEN
+    try:
+        API_TOKEN = validate_http_startup_config()
+    except RuntimeError as exc:
+        log(f"Startup aborted: {exc}")
+        raise SystemExit(1) from None
+
     server = ThreadingHTTPServer(("0.0.0.0", PORT), MCPHTTPHandler)
     log(f"handcraft-mcp HTTP server starting")
     log(f"Protocol : {PROTOCOL_VERSION}")
