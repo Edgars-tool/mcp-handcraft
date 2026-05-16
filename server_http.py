@@ -73,6 +73,9 @@ SERVER_INFO = {
 
 JOBS_LOCK = threading.Lock()
 JOBS: dict[str, dict] = {}
+DISCORD_WEBHOOK_EVENTS_LOCK = threading.Lock()
+DISCORD_WEBHOOK_EVENTS: list[dict] = []
+MAX_DISCORD_WEBHOOK_EVENTS = int(os.getenv("MCP_DISCORD_WEBHOOK_EVENT_LIMIT", "100"))
 
 # ── OAuth 2.0 一次性授權碼（記憶體暫存，重啟後清空）──────────────────────────
 OAUTH_CODES_LOCK = threading.Lock()
@@ -1648,6 +1651,43 @@ def dispatch(msg: dict):
         return make_error(req_id, -32603, f"Internal error: {exc}")
 
 
+def handle_discord_webhook_payload(payload: dict) -> tuple[int, dict]:
+    if not isinstance(payload, dict):
+        return 400, {"ok": False, "error": "Discord webhook payload must be a JSON object"}
+
+    if payload.get("type") == 1:
+        return 200, {"type": 1}
+
+    event = {
+        "event_id": str(payload.get("id") or uuid.uuid4()),
+        "received_at": datetime.datetime.now(datetime.UTC).isoformat(),
+        "type": payload.get("type"),
+        "guild_id": payload.get("guild_id"),
+        "channel_id": payload.get("channel_id"),
+        "author": (
+            (payload.get("author") or {}).get("username")
+            or (payload.get("member") or {}).get("user", {}).get("username")
+        ),
+        "content": payload.get("content"),
+        "raw": payload,
+    }
+    with DISCORD_WEBHOOK_EVENTS_LOCK:
+        DISCORD_WEBHOOK_EVENTS.append(event)
+        if len(DISCORD_WEBHOOK_EVENTS) > MAX_DISCORD_WEBHOOK_EVENTS:
+            del DISCORD_WEBHOOK_EVENTS[:-MAX_DISCORD_WEBHOOK_EVENTS]
+
+    log(
+        "Discord webhook received: "
+        f"event_id={event['event_id']} type={event['type']} channel_id={event['channel_id']}"
+    )
+    return 200, {
+        "ok": True,
+        "source": "discord",
+        "event_id": event["event_id"],
+        "stored_events": len(DISCORD_WEBHOOK_EVENTS),
+    }
+
+
 # ─── HTTP Handler ─────────────────────────────────────────────────────────────
 
 class MCPHTTPHandler(BaseHTTPRequestHandler):
@@ -1800,6 +1840,9 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
         if parsed_path == "/register":
             self._handle_register()
             return
+        if parsed_path == "/webhook/discord":
+            self._handle_discord_webhook()
+            return
         if parsed_path != "/mcp":
             self.send_response(404)
             self.end_headers()
@@ -1863,6 +1906,18 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
         self._send_json(response)
 
     # ── 回應輔助 ──────────────────────────────────────────────────────────────
+    def _handle_discord_webhook(self) -> None:
+        content_length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(content_length) if content_length > 0 else b"{}"
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            self._send_json({"ok": False, "error": f"Invalid JSON: {exc}"}, status=400)
+            return
+
+        status, response = handle_discord_webhook_payload(payload)
+        self._send_json(response, status=status)
+
     def _send_json(self, obj: dict, status: int = 200) -> None:
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         log(f"SEND → {body.decode('utf-8')}")

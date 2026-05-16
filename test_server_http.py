@@ -7,9 +7,12 @@ import server_http
 from server_http import (
     JOBS,
     JOBS_LOCK,
+    DISCORD_WEBHOOK_EVENTS,
+    DISCORD_WEBHOOK_EVENTS_LOCK,
     TOOLS,
     cleanup_expired_jobs,
     create_job,
+    handle_discord_webhook_payload,
     handle_agent_job_cleanup,
     handle_agent_job_list,
     handle_claude_code_agent,
@@ -91,6 +94,42 @@ class HttpStartupConfigTests(unittest.TestCase):
 
     def test_mcp_api_token_trims_configured_value(self):
         self.assertEqual("secret-token", validate_mcp_api_token("  secret-token  "))
+
+
+class DiscordWebhookTests(unittest.TestCase):
+    def setUp(self):
+        with DISCORD_WEBHOOK_EVENTS_LOCK:
+            DISCORD_WEBHOOK_EVENTS.clear()
+
+    def test_discord_ping_returns_pong(self):
+        status, response = handle_discord_webhook_payload({"type": 1})
+
+        self.assertEqual(200, status)
+        self.assertEqual({"type": 1}, response)
+
+    def test_discord_message_payload_is_stored(self):
+        status, response = handle_discord_webhook_payload({
+            "id": "msg-1",
+            "channel_id": "channel-1",
+            "guild_id": "guild-1",
+            "author": {"username": "edgar"},
+            "content": "hello webhook",
+        })
+
+        self.assertEqual(200, status)
+        self.assertTrue(response["ok"])
+        self.assertEqual("discord", response["source"])
+        self.assertEqual("msg-1", response["event_id"])
+
+        with DISCORD_WEBHOOK_EVENTS_LOCK:
+            self.assertEqual(1, len(DISCORD_WEBHOOK_EVENTS))
+            self.assertEqual("hello webhook", DISCORD_WEBHOOK_EVENTS[0]["content"])
+
+    def test_discord_payload_must_be_object(self):
+        status, response = handle_discord_webhook_payload(["not", "an", "object"])
+
+        self.assertEqual(400, status)
+        self.assertFalse(response["ok"])
 
 
 class ClaudeCodeAgentSmokeTests(unittest.TestCase):
